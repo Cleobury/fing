@@ -1,0 +1,417 @@
+"""The Settings window opened from the tray menu."""
+
+import threading
+import tkinter as tk
+from dataclasses import replace
+from tkinter import colorchooser, ttk
+
+import keyboard
+from typesafe_sdk import TypeSafeAPIError, TypeSafeAuthenticationError, TypeSafeError
+
+from . import search
+from .decide import Decider
+from .llm import PROVIDERS, Planner
+from .overlay import DEFAULT_BG, DEFAULT_DOTS, DEFAULT_FG
+from .settings import get_api_key, set_api_key
+
+_PROVIDER_LABELS = {"off": "Off", "openrouter": "OpenRouter", "ollama": "Ollama (local)"}
+_MODE_LABELS = {"confused": "Only when Jev is confused", "always": "Always (rewrite every command first)"}
+# Indicator dot states the user can recolour, with a sample message to preview each.
+_DOT_LABELS = {
+    "idle": ("Idle", ""),
+    "listening": ("Listening", "Listening…"),
+    "thinking": ("Working", "“open Steam”"),
+    "done": ("Done", "Open Steam"),
+    "question": ("Question", "Click which one?  1) …  2) …"),
+    "warn": ("Warning", "Couldn't find it on this screen"),
+    "error": ("Error", "Couldn't reach TypeSafe"),
+}
+
+
+def _link(parent, text: str, url: str) -> ttk.Label:
+    label = ttk.Label(parent, text=text, foreground="#1a73e8", cursor="hand2")
+    label.bind("<Button-1>", lambda _: __import__("webbrowser").open(url))
+    return label
+
+
+def _row(parent, row: int, label: str) -> None:
+    ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=(8, 0), padx=(0, 12))
+
+
+class SettingsDialog:
+    def __init__(self, app):
+        self.app = app
+        s = app.settings
+        win = self.win = tk.Toplevel(app.root)
+        win.title("Jev Harness settings")
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        win.protocol("WM_DELETE_WINDOW", self.close)
+        outer = ttk.Frame(win, padding=12)
+        outer.grid(sticky="nsew")
+        tabs = ttk.Notebook(outer)
+        tabs.grid(row=0, column=0, sticky="nsew")
+
+        self._build_jev_tab(tabs, s)
+        self._build_planner_tab(tabs, s)
+        self._build_search_tab(tabs, s)
+        self._build_indicator_tab(tabs, s)
+
+        self.status = tk.StringVar(value="Keys are stored in Windows Credential Manager.")
+        ttk.Label(outer, textvariable=self.status, foreground="#5f6368", wraplength=480).grid(row=1, column=0, sticky="w", pady=(10, 0))
+        btns = ttk.Frame(outer)
+        btns.grid(row=2, column=0, sticky="e", pady=(10, 0))
+        self.test_btn = ttk.Button(btns, text="Test connections", command=self.test)
+        self.test_btn.pack(side="left")
+        ttk.Button(btns, text="Cancel", command=self.close).pack(side="left", padx=6)
+        ttk.Button(btns, text="Save", command=self.save).pack(side="left")
+
+        self._provider_changed(initial=True)
+        self._powertoys_changed(initial=True)
+        win.update_idletasks()
+        x = (win.winfo_screenwidth() - win.winfo_width()) // 2
+        y = (win.winfo_screenheight() - win.winfo_height()) // 3
+        win.geometry(f"+{x}+{y}")
+        win.focus_force()
+        self.key_entry.focus_set()
+
+    def _tab(self, tabs: ttk.Notebook, title: str) -> ttk.Frame:
+        frame = ttk.Frame(tabs, padding=14)
+        tabs.add(frame, text=title)
+        return frame
+
+    # ---- Jev ----------------------------------------------------------------------
+
+    def _build_jev_tab(self, tabs, s) -> None:
+        f = self._tab(tabs, "Jev")
+        self.key = tk.StringVar(value=get_api_key() or "")
+        self.model = tk.StringVar(value=s.model)
+        self.dry_run = tk.BooleanVar(value=s.dry_run)
+        self.min_action = tk.DoubleVar(value=s.min_action_prob)
+        self.min_target = tk.DoubleVar(value=s.min_target_prob)
+
+        _row(f, 0, "TypeSafe API key")
+        self.key_entry = ttk.Entry(f, textvariable=self.key, show="•", width=46)
+        self.key_entry.grid(row=0, column=1, columnspan=2, sticky="we", pady=(8, 0))
+        _link(f, "Get a key at console.typesafe.ai/keys", "https://console.typesafe.ai/keys").grid(row=1, column=1, columnspan=2, sticky="w")
+        _row(f, 2, "Model")
+        ttk.Entry(f, textvariable=self.model, width=20).grid(row=2, column=1, sticky="w", pady=(8, 0))
+        _row(f, 3, "Min action probability")
+        ttk.Spinbox(f, from_=0.0, to=1.0, increment=0.05, textvariable=self.min_action, width=6).grid(row=3, column=1, sticky="w", pady=(8, 0))
+        _row(f, 4, "Min target probability")
+        ttk.Spinbox(f, from_=0.0, to=1.0, increment=0.05, textvariable=self.min_target, width=6).grid(row=4, column=1, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(f, text="Dry run: highlight what would happen without doing it", variable=self.dry_run).grid(
+            row=5, column=0, columnspan=3, sticky="w", pady=(12, 0))
+
+    # ---- AI planner -----------------------------------------------------------------
+
+    def _build_planner_tab(self, tabs, s) -> None:
+        f = self._tab(tabs, "AI planner")
+        ttk.Label(f, text="Rewrites a request into simple steps when Jev is confused.", foreground="#5f6368").grid(
+            row=0, column=0, columnspan=3, sticky="w")
+        self.provider = tk.StringVar(value=_PROVIDER_LABELS.get(s.llm_provider, "Off"))
+        self.llm_model = tk.StringVar(value=s.llm_model)
+        self.llm_key = tk.StringVar()
+        self.llm_url = tk.StringVar(value=s.llm_base_url)
+        self.llm_mode = tk.StringVar(value=_MODE_LABELS.get(s.llm_mode, _MODE_LABELS["confused"]))
+        self.llm_screenshot = tk.BooleanVar(value=s.llm_screenshot)
+        self.llm_keep_alive = tk.BooleanVar(value=s.llm_keep_alive)
+
+        _row(f, 1, "Provider")
+        prov = ttk.Combobox(f, textvariable=self.provider, values=list(_PROVIDER_LABELS.values()), state="readonly", width=18)
+        prov.grid(row=1, column=1, sticky="w", pady=(8, 0))
+        prov.bind("<<ComboboxSelected>>", lambda _: self._provider_changed())
+        _row(f, 2, "Model")
+        self.model_box = ttk.Combobox(f, textvariable=self.llm_model, width=34)
+        self.model_box.grid(row=2, column=1, sticky="w", pady=(8, 0))
+        self.load_btn = ttk.Button(f, text="Load list", command=self.load_models)
+        self.load_btn.grid(row=2, column=2, sticky="w", padx=(6, 0), pady=(8, 0))
+        self.llm_key_label = ttk.Label(f, text="OpenRouter key")
+        self.llm_key_label.grid(row=3, column=0, sticky="w", pady=(8, 0))
+        self.llm_key_entry = ttk.Entry(f, textvariable=self.llm_key, show="•", width=46)
+        self.llm_key_entry.grid(row=3, column=1, columnspan=2, sticky="we", pady=(8, 0))
+        self.llm_key_link = _link(f, "Get a key at openrouter.ai/keys", "https://openrouter.ai/keys")
+        self.llm_key_link.grid(row=4, column=1, columnspan=2, sticky="w")
+        _row(f, 5, "Server URL")
+        self.url_entry = ttk.Entry(f, textvariable=self.llm_url, width=46)
+        self.url_entry.grid(row=5, column=1, columnspan=2, sticky="we", pady=(8, 0))
+        _row(f, 6, "Use it")
+        ttk.Combobox(f, textvariable=self.llm_mode, values=list(_MODE_LABELS.values()), state="readonly", width=34).grid(
+            row=6, column=1, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(f, text="Send a screenshot (needs a vision model)", variable=self.llm_screenshot).grid(
+            row=7, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        self.keep_alive_check = ttk.Checkbutton(
+            f, text="Keep the model loaded in memory (Ollama; uses GPU memory while the app runs)", variable=self.llm_keep_alive)
+        self.keep_alive_check.grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+    def _provider_id(self) -> str:
+        return next(k for k, v in _PROVIDER_LABELS.items() if v == self.provider.get())
+
+    def _provider_changed(self, initial: bool = False) -> None:
+        pid = self._provider_id()
+        info = PROVIDERS.get(pid)
+        on = info is not None
+        needs_key = bool(info and info["needs_key"])
+        for w in (self.model_box, self.load_btn, self.url_entry):
+            w.state(["!disabled"] if on else ["disabled"])
+        self.keep_alive_check.state(["!disabled"] if pid == "ollama" else ["disabled"])
+        self.llm_key_entry.state(["!disabled"] if needs_key else ["disabled"])
+        self.llm_key.set((get_api_key(pid) or "") if needs_key else "")
+        self.llm_key_label.configure(text=f"{_PROVIDER_LABELS.get(pid, '')} key" if needs_key else "API key")
+        if needs_key:
+            self.llm_key_link.grid()
+        else:
+            self.llm_key_link.grid_remove()
+        if on and not initial:
+            # Switching provider: show that provider's defaults.
+            self.llm_url.set("")
+            self.llm_model.set(info["model"])
+            self.model_box.configure(values=[])
+            if pid == "ollama":
+                self.load_models()
+        if on and not self.llm_url.get() and not initial:
+            self.status.set(f"Server: {info['base_url']} (leave URL blank for this default)")
+
+    def _planner(self) -> Planner | None:
+        pid = self._provider_id()
+        if pid not in PROVIDERS:
+            return None
+        return Planner(pid, self.llm_model.get().strip(), self.llm_key.get().strip() or None,
+                       self.llm_url.get().strip() or None, self.llm_screenshot.get(), timeout_s=20)
+
+    def load_models(self) -> None:
+        planner = self._planner()
+        if planner is None:
+            return
+        self.status.set("Loading models…")
+
+        def run():
+            try:
+                models = planner.list_models()
+                msg = f"{len(models)} models available" + (" with structured output" if planner.provider == "openrouter" else "")
+                if planner.provider == "ollama" and not models:
+                    msg = "Ollama has no models yet: run `ollama pull <model>` first"
+            except Exception as e:
+                models, msg = [], f"Couldn't load models: {e}"
+            self.app.ui(self._models_loaded, models, msg)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _models_loaded(self, models: list[str], msg: str) -> None:
+        if not self.win.winfo_exists():
+            return
+        self.model_box.configure(values=models)
+        if models and self.llm_model.get() not in models:
+            self.llm_model.set(models[0])
+        self.status.set(msg)
+
+    # ---- PC search --------------------------------------------------------------------
+
+    def _build_search_tab(self, tabs, s) -> None:
+        f = self._tab(tabs, "PC search")
+        ttk.Label(f, text="Used to find files, folders and settings that aren't on screen.", foreground="#5f6368").grid(
+            row=0, column=0, columnspan=3, sticky="w")
+        self.powertoys = tk.BooleanVar(value=s.powertoys_search)
+        self.hotkey = tk.StringVar(value=s.search_hotkey)
+        ttk.Checkbutton(f, text="Search with PowerToys (Command Palette / Run) instead of the Start menu",
+                        variable=self.powertoys, command=self._powertoys_changed).grid(row=1, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        _row(f, 2, "Its shortcut")
+        self.hotkey_entry = ttk.Entry(f, textvariable=self.hotkey, width=22)
+        self.hotkey_entry.grid(row=2, column=1, sticky="w", pady=(8, 0))
+        hk_btns = ttk.Frame(f)
+        hk_btns.grid(row=2, column=2, sticky="w", padx=(6, 0), pady=(8, 0))
+        self.record_btn = ttk.Button(hk_btns, text="Record", width=7, command=self.record_hotkey)
+        self.record_btn.pack(side="left")
+        self.detect_btn = ttk.Button(hk_btns, text="Detect", width=7, command=self.detect_hotkey)
+        self.detect_btn.pack(side="left", padx=(4, 0))
+
+    def _powertoys_changed(self, initial: bool = False) -> None:
+        on = self.powertoys.get()
+        for w in (self.hotkey_entry, self.record_btn, self.detect_btn):
+            w.state(["!disabled"] if on else ["disabled"])
+        if on and not initial:
+            self.detect_hotkey(quiet_if_same=True)
+
+    def detect_hotkey(self, quiet_if_same: bool = False) -> None:
+        found = search.detect_powertoys_hotkey()
+        if found is None:
+            self.status.set("Couldn't find a PowerToys search shortcut: is Command Palette or PowerToys Run enabled?")
+        elif found != self.hotkey.get():
+            self.hotkey.set(found)
+            self.status.set(f"Using your PowerToys shortcut: {found}")
+        elif not quiet_if_same:
+            self.status.set(f"Matches your PowerToys shortcut ({found}).")
+
+    def record_hotkey(self) -> None:
+        self.status.set("Press the shortcut now…")
+        self.record_btn.state(["disabled"])
+
+        def run():
+            combo = keyboard.read_hotkey(suppress=True)  # capture it without also triggering it
+            self.app.ui(self._hotkey_recorded, combo)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _hotkey_recorded(self, combo: str) -> None:
+        if not self.win.winfo_exists():
+            return
+        self.record_btn.state(["!disabled"])
+        self.hotkey.set(combo)
+        self.status.set(f"Shortcut set to {combo}.")
+
+    # ---- Indicator ----------------------------------------------------------------------
+
+    def _build_indicator_tab(self, tabs, s) -> None:
+        f = self._tab(tabs, "Indicator")
+        ttk.Label(f, text="The status pill above the taskbar. Changes preview live.", foreground="#5f6368").grid(
+            row=0, column=0, columnspan=4, sticky="w")
+        self.style = {"bg": s.overlay_bg, "fg": s.overlay_fg, "dots": {**DEFAULT_DOTS, **s.overlay_dots}}
+        self.opacity = tk.IntVar(value=s.overlay_opacity)
+        self.swatches: dict[str, tk.Button] = {}
+
+        _row(f, 1, "Background")
+        self._swatch(f, "bg", 1, 1, "Background", "Jev ready · hold Right Ctrl to speak")
+        _row(f, 2, "Text")
+        self._swatch(f, "fg", 2, 1, "Text", "Jev ready · hold Right Ctrl to speak")
+        _row(f, 3, "Opacity")
+        op = ttk.Frame(f)
+        op.grid(row=3, column=1, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Scale(op, from_=20, to=100, variable=self.opacity, length=220, command=lambda _: self._opacity_moved()).pack(side="left")
+        self.opacity_label = ttk.Label(op, width=5)
+        self.opacity_label.pack(side="left", padx=(8, 0))
+
+        ttk.Label(f, text="Dot colours", font=("Segoe UI", 9, "bold")).grid(row=4, column=0, columnspan=4, sticky="w", pady=(14, 0))
+        for i, (state, (label, sample)) in enumerate(_DOT_LABELS.items()):
+            row, col = 5 + i // 2, (i % 2) * 2
+            ttk.Label(f, text=label).grid(row=row, column=col, sticky="w", pady=(8, 0), padx=(0, 12))
+            self._swatch(f, state, row, col + 1, f"{label} dot", sample, dot=True)
+        ttk.Button(f, text="Reset to defaults", command=self._reset_style).grid(row=9, column=0, columnspan=4, sticky="w", pady=(14, 0))
+        self._opacity_moved(preview=False)
+
+    def _swatch(self, parent, key: str, row: int, col: int, title: str, sample: str, dot: bool = False) -> None:
+        colour = self.style["dots"][key] if dot else self.style[key]
+        b = tk.Button(parent, width=4, relief="groove", bg=colour, activebackground=colour,
+                      command=lambda: self._pick(key, title, sample, dot))
+        b.grid(row=row, column=col, sticky="w", pady=(8, 0), padx=(0, 18))
+        self.swatches[key] = b
+
+    def _pick(self, key: str, title: str, sample: str, dot: bool) -> None:
+        current = self.style["dots"][key] if dot else self.style[key]
+        _, colour = colorchooser.askcolor(current, parent=self.win, title=f"{title} colour")
+        if not colour:
+            return
+        if dot:
+            self.style["dots"][key] = colour
+        else:
+            self.style[key] = colour
+        self.swatches[key].configure(bg=colour, activebackground=colour)
+        self._preview(key if dot else "idle", sample)
+
+    def _opacity_moved(self, preview: bool = True) -> None:
+        self.opacity_label.configure(text=f"{self.opacity.get():.0f}%")
+        if preview:
+            self._preview("idle", "Jev ready · hold Right Ctrl to speak")
+
+    def _reset_style(self) -> None:
+        self.style = {"bg": DEFAULT_BG, "fg": DEFAULT_FG, "dots": dict(DEFAULT_DOTS)}
+        self.opacity.set(100)
+        for key, b in self.swatches.items():
+            colour = self.style["dots"].get(key) or self.style[key]
+            b.configure(bg=colour, activebackground=colour)
+        self._opacity_moved()
+
+    def _style_settings(self):
+        return replace(self.app.settings, overlay_bg=self.style["bg"], overlay_fg=self.style["fg"],
+                       overlay_opacity=round(self.opacity.get()), overlay_dots=self._changed_dots())
+
+    def _changed_dots(self) -> dict[str, str]:
+        return {k: v for k, v in self.style["dots"].items() if v.lower() != DEFAULT_DOTS[k].lower()}
+
+    def _preview(self, state: str, sample: str) -> None:
+        """Show the indicator with the unsaved style for a few seconds, in the state being edited."""
+        overlay = self.app.overlay
+        self.app.apply_overlay_style(self._style_settings())
+        overlay.show(state, sample, 3000)
+
+    # ---- test / save / close ---------------------------------------------------------------
+
+    def test(self) -> None:
+        key, model = self.key.get().strip(), self.model.get().strip() or "jev-latest"
+        planner = self._planner()
+        self.status.set("Testing…")
+        self.test_btn.state(["disabled"])
+
+        def run():
+            lines = []
+            if not key:
+                lines.append("Jev: enter a TypeSafe API key.")
+            else:
+                try:
+                    p = Decider(key, model).ping()
+                    lines.append(f"Jev: connected to {model} (test answer {p:.2f}, expect ≈1).")
+                except TypeSafeAuthenticationError:
+                    lines.append("Jev: key rejected (401).")
+                except TypeSafeAPIError as e:
+                    lines.append(f"Jev: API error {e.status}.")
+                except TypeSafeError as e:
+                    lines.append(f"Jev: could not connect ({e}).")
+            if planner is not None:
+                try:
+                    r = planner.http.post(f"{planner.base_url}/chat/completions", json={
+                        "model": planner.model, "max_tokens": 5,
+                        "messages": [{"role": "user", "content": "Reply with the word ok."}]})
+                    r.raise_for_status()
+                    lines.append(f"AI planner: {planner.model} replied.")
+                except Exception as e:
+                    lines.append(f"AI planner: failed ({str(e)[:120]}).")
+            self.app.ui(self._test_done, " ".join(lines))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _test_done(self, msg: str) -> None:
+        if self.win.winfo_exists():
+            self.status.set(msg)
+            self.test_btn.state(["!disabled"])
+
+    def save(self) -> None:
+        try:
+            min_action, min_target = float(self.min_action.get()), float(self.min_target.get())
+        except (tk.TclError, ValueError):
+            self.status.set("Probabilities must be numbers between 0 and 1.")
+            return
+        hotkey = self.hotkey.get().strip().lower() or search.DEFAULT_HOTKEY
+        if self.powertoys.get() and not search.valid_hotkey(hotkey):
+            self.status.set(f"“{hotkey}” isn't a shortcut I recognise. Try Record, or e.g. “left alt+space”.")
+            return
+        s = self.app.settings
+        s.model = self.model.get().strip() or "jev-latest"
+        s.dry_run = self.dry_run.get()
+        s.min_action_prob = min(1.0, max(0.0, min_action))
+        s.min_target_prob = min(1.0, max(0.0, min_target))
+        pid = self._provider_id()
+        s.llm_provider = pid
+        s.llm_model = self.llm_model.get().strip()
+        s.llm_base_url = self.llm_url.get().strip()
+        s.llm_mode = next(k for k, v in _MODE_LABELS.items() if v == self.llm_mode.get())
+        s.llm_screenshot = self.llm_screenshot.get()
+        s.llm_keep_alive = self.llm_keep_alive.get()
+        s.powertoys_search = self.powertoys.get()
+        s.search_hotkey = hotkey
+        s.overlay_bg, s.overlay_fg = self.style["bg"], self.style["fg"]
+        s.overlay_opacity = round(self.opacity.get())
+        s.overlay_dots = self._changed_dots()
+        s.save()
+        set_api_key(self.key.get().strip())
+        if PROVIDERS.get(pid, {}).get("needs_key"):
+            set_api_key(self.llm_key.get().strip(), pid)
+        self.app.on_settings_changed()
+        self._destroy()
+
+    def close(self) -> None:
+        """Cancel: drop unsaved changes, including any indicator preview."""
+        self.app.apply_overlay_style()
+        self._destroy()
+
+    def _destroy(self) -> None:
+        self.win.destroy()
+        self.app.settings_dialog = None

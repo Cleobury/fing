@@ -1,0 +1,28 @@
+# Jev Harness: Windows 10/11, Python 3.14, NVIDIA GPU (CUDA 12) for Whisper.
+
+# Decisions
+typesafe-sdk==0.7.2
+httpx==0.28.1  # AI planner (OpenRouter / Ollama, OpenAI-compatible API)
+
+# Speech to text (Whisper on the GPU) and the CUDA libraries CTranslate2 needs
+faster-whisper==1.2.1
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cudnn-cu12==9.26.0.51
+numpy==2.5.3
+sounddevice==0.5.6
+
+# Screen capture and Windows' built-in OCR
+mss==10.2.0
+winrt-runtime==3.2.1
+winrt-Windows.Foundation==3.2.1
+winrt-Windows.Foundation.Collections==3.2.1
+winrt-Windows.Globalization==3.2.1
+winrt-Windows.Graphics.Imaging==3.2.1
+winrt-Windows.Media.Ocr==3.2.1
+winrt-Windows.Storage.Streams==3.2.1
+
+# Input, tray icon, settings
+keyboard==0.13.5
+pystray==0.19.5
+pillow==12.3.0
+keyring==25.7.0

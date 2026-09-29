@@ -1,0 +1,89 @@
+"""User settings (JSON in %APPDATA%) and API keys (Windows Credential Manager)."""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from dataclasses import asdict, dataclass, field, fields
+
+import keyring
+
+APP_NAME = "JevHarness"
+DATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
+LOG_DIR = os.path.join(DATA_DIR, "logs")
+SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
+
+_KEYRING_SERVICE = APP_NAME
+_KEYRING_USER = "typesafe_api_key"
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class Settings:
+    dry_run: bool = False
+    model: str = "jev-latest"
+    # Minimum probability of Jev's chosen action / on-screen target before we act.
+    min_action_prob: float = 0.5
+    min_target_prob: float = 0.4
+    whisper_model: str = "large-v3-turbo"
+    language: str = "en"
+    # AI planner used when Jev is confused: "off", "openrouter" or "ollama".
+    llm_provider: str = "off"
+    llm_model: str = "google/gemini-3.8-flash"
+    llm_base_url: str = ""  # blank = the provider's default
+    llm_mode: str = "confused"  # "confused": only when Jev struggles; "always": rewrite every command first
+    llm_screenshot: bool = True
+    llm_keep_alive: bool = False  # Ollama: keep the model loaded in memory instead of unloading after 5 minutes idle
+    # Search the PC with PowerToys (Command Palette / PowerToys Run) via this hotkey instead of the Start menu.
+    powertoys_search: bool = False
+    search_hotkey: str = "left alt+space"
+    # The indicator above the taskbar.
+    overlay_bg: str = "#202124"
+    overlay_fg: str = "#f1f3f4"
+    overlay_opacity: int = 100  # percent
+    overlay_dots: dict = field(default_factory=dict)  # state -> colour, overriding the defaults
+
+    @classmethod
+    def load(cls) -> Settings:
+        try:
+            with open(SETTINGS_PATH, encoding="utf-8") as f:
+                raw = json.load(f)
+        except FileNotFoundError:
+            return cls()
+        except (OSError, ValueError):
+            log.exception("Could not read settings; using defaults")
+            return cls()
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in raw.items() if k in known})
+
+    def save(self) -> None:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(asdict(self), f, indent=2)
+
+
+def get_api_key(name: str = "typesafe") -> str | None:
+    """The <NAME>_API_KEY environment variable wins; otherwise the key saved in Credential Manager."""
+    if key := os.environ.get(f"{name.upper()}_API_KEY"):
+        return key
+    try:
+        return keyring.get_password(_KEYRING_SERVICE, _keyring_user(name))
+    except keyring.errors.KeyringError:
+        log.exception("Could not read %s API key from Credential Manager", name)
+        return None
+
+
+def set_api_key(key: str, name: str = "typesafe") -> None:
+    if key:
+        keyring.set_password(_KEYRING_SERVICE, _keyring_user(name), key)
+        return
+    try:
+        keyring.delete_password(_KEYRING_SERVICE, _keyring_user(name))
+    except keyring.errors.PasswordDeleteError:
+        pass
+
+
+def _keyring_user(name: str) -> str:
+    return _KEYRING_USER if name == "typesafe" else f"{name}_api_key"

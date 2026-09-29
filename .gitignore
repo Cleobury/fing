@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ruff_cache/
+.pytest_cache/
+
+# Shortcut created by setup.ps1 (contains machine-specific paths)
+*.lnk
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Local secrets, just in case (keys normally live in Windows Credential Manager)
+.env
