@@ -16,6 +16,15 @@ from .settings import get_api_key, set_api_key
 
 _PROVIDER_LABELS = {"off": "Off", "openrouter": "OpenRouter", "ollama": "Ollama (local)"}
 _MODE_LABELS = {"confused": "Only when Jev is confused", "always": "Always (rewrite every command first)"}
+_POSITION_LABELS = {
+    "bottom-centre": "Bottom centre (above taskbar)",
+    "bottom-left": "Bottom left",
+    "bottom-right": "Bottom right",
+    "top-centre": "Top centre",
+    "top-left": "Top left",
+    "top-right": "Top right",
+    "custom": "Custom (dragged)",
+}
 # Indicator dot states the user can recolour, with a sample message to preview each.
 _DOT_LABELS = {
     "idle": ("Idle", ""),
@@ -42,6 +51,7 @@ class SettingsDialog:
     def __init__(self, app):
         self.app = app
         s = app.settings
+        self._served_by_test = False  # a Test switched the local model in memory
         win = self.win = tk.Toplevel(app.root)
         win.title("Jev Harness settings")
         win.resizable(False, False)
@@ -177,7 +187,8 @@ class SettingsDialog:
         if pid not in PROVIDERS:
             return None
         return Planner(pid, self.llm_model.get().strip(), self.llm_key.get().strip() or None,
-                       self.llm_url.get().strip() or None, self.llm_screenshot.get(), timeout_s=20)
+                       self.llm_url.get().strip() or None, self.llm_screenshot.get(), timeout_s=20,
+                       keep_alive=self.llm_keep_alive.get())
 
     def load_models(self) -> None:
         planner = self._planner()
@@ -188,9 +199,12 @@ class SettingsDialog:
         def run():
             try:
                 models = planner.list_models()
-                msg = f"{len(models)} models available" + (" with structured output" if planner.provider == "openrouter" else "")
-                if planner.provider == "ollama" and not models:
-                    msg = "Ollama has no models yet: run `ollama pull <model>` first"
+                if planner.provider == "openrouter":
+                    msg = f"{len(models)} models available with structured output"
+                elif models:
+                    msg = f"{len(models)} local models can generate text (embedding-only models are hidden)"
+                else:
+                    msg = "Ollama has no models that can generate text yet: run `ollama pull <model>` first"
             except Exception as e:
                 models, msg = [], f"Couldn't load models: {e}"
             self.app.ui(self._models_loaded, models, msg)
@@ -201,8 +215,12 @@ class SettingsDialog:
         if not self.win.winfo_exists():
             return
         self.model_box.configure(values=models)
-        if models and self.llm_model.get() not in models:
+        current = self.llm_model.get()
+        if models and current not in models:
+            # The current choice isn't usable (e.g. an embedding model, or blank): offer the first one that is.
             self.llm_model.set(models[0])
+            if current:
+                msg += f". “{current}” can't be used for planning, so I picked {models[0]}"
         self.status.set(msg)
 
     # ---- PC search --------------------------------------------------------------------
@@ -280,12 +298,24 @@ class SettingsDialog:
         self.opacity_label = ttk.Label(op, width=5)
         self.opacity_label.pack(side="left", padx=(8, 0))
 
-        ttk.Label(f, text="Dot colours", font=("Segoe UI", 9, "bold")).grid(row=4, column=0, columnspan=4, sticky="w", pady=(14, 0))
+        _row(f, 4, "Position")
+        self.position = tk.StringVar(value=_POSITION_LABELS.get(s.overlay_position, _POSITION_LABELS["bottom-centre"]))
+        self.custom_xy = (s.overlay_x, s.overlay_y)
+        pos = ttk.Frame(f)
+        pos.grid(row=4, column=1, columnspan=3, sticky="w", pady=(8, 0))
+        box = ttk.Combobox(pos, textvariable=self.position, values=[v for k, v in _POSITION_LABELS.items() if k != "custom"],
+                           state="readonly", width=24)
+        box.pack(side="left")
+        box.bind("<<ComboboxSelected>>", lambda _: self._preview("idle", "Jev ready · hold Right Ctrl to speak"))
+        ttk.Button(pos, text="Drag…", command=self._drag_indicator).pack(side="left", padx=(6, 0))
+        ttk.Button(pos, text="Reset position", command=self._reset_position).pack(side="left", padx=(6, 0))
+
+        ttk.Label(f, text="Dot colours", font=("Segoe UI", 9, "bold")).grid(row=5, column=0, columnspan=4, sticky="w", pady=(14, 0))
         for i, (state, (label, sample)) in enumerate(_DOT_LABELS.items()):
-            row, col = 5 + i // 2, (i % 2) * 2
+            row, col = 6 + i // 2, (i % 2) * 2
             ttk.Label(f, text=label).grid(row=row, column=col, sticky="w", pady=(8, 0), padx=(0, 12))
             self._swatch(f, state, row, col + 1, f"{label} dot", sample, dot=True)
-        ttk.Button(f, text="Reset to defaults", command=self._reset_style).grid(row=9, column=0, columnspan=4, sticky="w", pady=(14, 0))
+        ttk.Button(f, text="Reset to defaults", command=self._reset_style).grid(row=10, column=0, columnspan=4, sticky="w", pady=(14, 0))
         self._opacity_moved(preview=False)
 
     def _swatch(self, parent, key: str, row: int, col: int, title: str, sample: str, dot: bool = False) -> None:
@@ -312,8 +342,33 @@ class SettingsDialog:
         if preview:
             self._preview("idle", "Jev ready · hold Right Ctrl to speak")
 
+    def _drag_indicator(self) -> None:
+        """Let the user drag the indicator; the spot becomes the "Custom" position (saved on Save)."""
+        self.status.set("Drag the indicator where you want it, then double-click it.")
+
+        def done(x: int, y: int) -> None:
+            if not self.win.winfo_exists():
+                return
+            self.custom_xy = (x, y)
+            self.position.set(_POSITION_LABELS["custom"])
+            self.status.set("Indicator placed. Save to keep it there.")
+
+        self.app.apply_overlay_style(self._style_settings())
+        self.app.overlay.start_move(done)
+
+    def _reset_position(self) -> None:
+        self.app.overlay.finish_move(keep=False)
+        self.position.set(_POSITION_LABELS["bottom-centre"])
+        self.custom_xy = (0, 0)
+        self.status.set("Indicator back at bottom centre. Save to keep it there.")
+        self._preview("idle", "Jev ready · hold Right Ctrl to speak")
+
+    def _position_id(self) -> str:
+        return next(k for k, v in _POSITION_LABELS.items() if v == self.position.get())
+
     def _reset_style(self) -> None:
         self.style = {"bg": DEFAULT_BG, "fg": DEFAULT_FG, "dots": dict(DEFAULT_DOTS)}
+        self.position.set(_POSITION_LABELS["bottom-centre"])
         self.opacity.set(100)
         for key, b in self.swatches.items():
             colour = self.style["dots"].get(key) or self.style[key]
@@ -322,7 +377,8 @@ class SettingsDialog:
 
     def _style_settings(self):
         return replace(self.app.settings, overlay_bg=self.style["bg"], overlay_fg=self.style["fg"],
-                       overlay_opacity=round(self.opacity.get()), overlay_dots=self._changed_dots())
+                       overlay_opacity=round(self.opacity.get()), overlay_dots=self._changed_dots(),
+                       overlay_position=self._position_id(), overlay_x=self.custom_xy[0], overlay_y=self.custom_xy[1])
 
     def _changed_dots(self) -> dict[str, str]:
         return {k: v for k, v in self.style["dots"].items() if v.lower() != DEFAULT_DOTS[k].lower()}
@@ -357,11 +413,14 @@ class SettingsDialog:
                     lines.append(f"Jev: could not connect ({e}).")
             if planner is not None:
                 try:
-                    r = planner.http.post(f"{planner.base_url}/chat/completions", json={
-                        "model": planner.model, "max_tokens": 5,
-                        "messages": [{"role": "user", "content": "Reply with the word ok."}]})
-                    r.raise_for_status()
-                    lines.append(f"AI planner: {planner.model} replied.")
+                    served = ""
+                    if planner.ollama_id:
+                        # Testing a local model makes it the one in memory: unload the previous, load this one.
+                        self.app.ui(self.status.set, f"Loading {planner.model}…")
+                        served = self.app.serve_model(planner)
+                        self._served_by_test = True
+                    planner.ping()
+                    lines.append(f"AI planner: {planner.model} replied" + (f" ({served})." if served else "."))
                 except Exception as e:
                     lines.append(f"AI planner: failed ({str(e)[:120]}).")
             self.app.ui(self._test_done, " ".join(lines))
@@ -374,6 +433,7 @@ class SettingsDialog:
             self.test_btn.state(["!disabled"])
 
     def save(self) -> None:
+        self.app.overlay.finish_move()  # still being dragged: take where it is now
         try:
             min_action, min_target = float(self.min_action.get()), float(self.min_target.get())
         except (tk.TclError, ValueError):
@@ -400,6 +460,8 @@ class SettingsDialog:
         s.overlay_bg, s.overlay_fg = self.style["bg"], self.style["fg"]
         s.overlay_opacity = round(self.opacity.get())
         s.overlay_dots = self._changed_dots()
+        s.overlay_position = self._position_id()
+        s.overlay_x, s.overlay_y = self.custom_xy
         s.save()
         set_api_key(self.key.get().strip())
         if PROVIDERS.get(pid, {}).get("needs_key"):
@@ -408,8 +470,13 @@ class SettingsDialog:
         self._destroy()
 
     def close(self) -> None:
-        """Cancel: drop unsaved changes, including any indicator preview."""
+        """Cancel: drop unsaved changes, including any indicator preview or unfinished drag, and any local model
+        a Test loaded (going back to the saved one)."""
+        self.app.overlay.finish_move(keep=False)
         self.app.apply_overlay_style()
+        if self._served_by_test:
+            saved = self.app.planner
+            self.app.serve_model_in_background(saved, load=bool(saved and saved.keep_alive))
         self._destroy()
 
     def _destroy(self) -> None:

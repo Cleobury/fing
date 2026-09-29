@@ -57,6 +57,15 @@ KEYS = {
     "ctrl+l": "Focus the browser address bar", "f5": "Refresh / reload",
     "alt+left": "Go back", "alt+right": "Go forward",
     "alt+tab": "Switch to the previous window", "windows": "Open the Start menu",
+    "windows+down": "Minimise the current window (or restore it if maximised)",
+    "windows+up": "Maximise the current window",
+    "windows+left": "Snap the current window to the left half of the screen",
+    "windows+right": "Snap the current window to the right half of the screen",
+    "alt+space": "Open the current window's system menu (restore, move, size, minimise, maximise, close)",
+    "windows+m": "Minimise all windows",
+    "f10": "Focus the app's menu bar",
+    "f11": "Toggle full screen",
+    "ctrl+=": "Zoom in", "ctrl+-": "Zoom out",
     "windows+d": "Show the desktop", "windows+e": "Open File Explorer",
     "volume up": "Volume up", "volume down": "Volume down", "volume mute": "Mute / unmute",
     "play/pause media": "Play or pause media",
@@ -78,10 +87,16 @@ class Question:
     """Something to ask the user before a step can go ahead."""
 
     prompt: str
-    kind: str  # "choose": pick one of `options`; "text": dictate free text
-    options: list[tuple[str, object]]  # (label shown to the user, payload passed to `complete`)
-    complete: Callable[[object], Plan]  # builds the runnable Plan from the answer
+    kind: str  # "choose": pick one of `options`; "text": pick one, or say something else (used as the answer)
+    options: list[tuple[str, object]]  # (label shown to the user, payload passed to `complete`); numbered from 1
+    complete: Callable[[object], Plan]  # builds the result (usually a runnable Plan) from the chosen payload / text
     rects: list[tuple[int, int, int, int]]  # on-screen boxes to number, same order as options
+
+
+def _span_options(answer, spans: list[str], n: int = 3) -> list[tuple[str, str]]:
+    """Jev's top guesses from a text/query Choice, as numbered options for "What should I type/search for?"."""
+    ranked = [k for k, _ in sorted(answer.probabilities.items(), key=lambda kv: -kv[1]) if k != "none"] if answer else []
+    return [(f'"{spans[int(k[1:])]}"', spans[int(k[1:])]) for k in ranked[:n]]
 
 
 @dataclass
@@ -453,9 +468,10 @@ def plan(answers: dict, targets: list[Element], texts: list[str], apps: list[App
             return fail("No text box to type into on this screen")
         text_ans = answers.get("text")
         if text_ans is None or text_ans.choice == "none" or text_ans.probabilities[text_ans.choice] < min_action:
-            # Jev couldn't pick the words out of the command: have the user dictate them.
+            # Jev couldn't pick the words out of the command: offer its best guesses, or the user says the text.
             return Plan(False, "What should I type?", kind=kind, log=log,
-                        question=Question("What should I type?", "text", [], lambda s: typing(s, into), []))
+                        question=Question("What should I type?", "text", _span_options(text_ans, texts),
+                                          lambda s: typing(s, into), []))
         text = texts[int(text_ans.choice[1:])]
         if tied:
             return ask(f'Type "{text[:30]}" into which box?', [(_label(e), e) for e in tied],
@@ -477,7 +493,7 @@ def plan(answers: dict, targets: list[Element], texts: list[str], apps: list[App
         text_ans = answers.get("query")
         if text_ans is None or text_ans.choice == "none" or text_ans.probabilities[text_ans.choice] < min_action:
             return Plan(False, "What should I search for?", kind=kind, log=log,
-                        question=Question("What should I search for?", "text", [], make, []))
+                        question=Question("What should I search for?", "text", _span_options(text_ans, texts), make, []))
         return make(texts[int(text_ans.choice[1:])])
 
     if kind == "open_app":

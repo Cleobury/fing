@@ -29,6 +29,12 @@ def _scroll(notches: int) -> None:
     _user32.mouse_event(_WHEEL, 0, 0, ctypes.c_uint32((notches * _NOTCH) & 0xFFFFFFFF), 0)
 
 
+def scroll_at(x: int, y: int, notches: int) -> None:
+    """Scroll the window under (x, y): positive is up. Wheel input goes to whatever is under the pointer."""
+    _user32.SetCursorPos(int(x), int(y))
+    _scroll(notches)
+
+
 def execute(p: Plan, search_hotkey: str | None = None) -> None:
     """Carry out `p`. `search_hotkey` opens PowerToys search for "search_pc"; None uses the Start menu."""
     if p.kind == "click":

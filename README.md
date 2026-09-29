@@ -58,7 +58,7 @@ It runs without a console window. To see its log output while debugging, run it 
 | Do | What happens |
 |---|---|
 | Hold **Right Ctrl**, speak, release | Carries out the request. The indicator above the taskbar shows progress. |
-| Answer a question | When it asks (e.g. "Click which one? 1) … 2) …"), hold Right Ctrl and say the answer: "the first one", a name, or the text to type |
+| Answer a question | Questions always list numbered options (the last is Cancel). Press the number, or hold Right Ctrl and say it ("two", "the second one"). Where it makes sense, e.g. "What should I type?", you can also just say your answer. |
 | **Esc** (or Right Ctrl) while it's working | Stops |
 | Click **✓** on the indicator while it's working | Tells it the task is done, so it stops (shown as **Done ✓**) |
 | Tray icon → **Dry run** | Highlights what it would do, without doing it |
@@ -75,14 +75,26 @@ Things you can say:
 - **Search the PC:** "find my budget spreadsheet", "open display settings". This uses the Start menu, or
   PowerToys if enabled; Jev then picks the matching result.
 
-Along the way it waits for slow apps and pages to load, looks elsewhere (e.g. a Store tab) when what it needs
-isn't on screen, and asks you when it's unsure or stuck.
+Along the way it waits for slow apps and pages to load, and asks you when it's unsure or stuck. When what it
+needs isn't apparent, it **explores**: it tries the most likely tab or menu (e.g. a Store tab), reads the screen
+again at 2× zoom to catch small text, and scrolls through the window. With an AI planner it goes further: the AI
+looks at where everything is on screen and suggests places to try (a sidebar, a "More" menu, going back, or a
+closer look at one corner), and it re-reads the screen after each. Exploring is capped at 8 actions and a minute
+per step; it never clicks things like Delete, Buy, Send or Sign out, and Esc stops it.
+
+Window commands work too: "minimise this window", "maximise it", "snap it to the left".
 
 ### The indicator
 
-A small dot above the taskbar while idle. It shows a pill with progress while you speak and while it works. It
-stays on top of other windows, but hides while idle when a fullscreen app, game or video is in front on the main
+A small dot above the taskbar while idle. It shows a pill with progress while you speak and while it works, and
+grows into a box (wrapping onto more lines as needed) when it asks you something. It
+stays on top of other windows, but hides while idle when a fullscreen app, game or video is in front on its
 screen.
+
+To move it, choose tray icon → **Move indicator**, drag it anywhere (any monitor) and double-click to drop it
+there; **Reset indicator position** puts it back. Settings → **Indicator** also has preset positions. The dot
+stays put and the text grows out of it, towards the middle of the screen: on the right-hand side the pill is
+mirrored, with the text to the left of the dot.
 
 ## Settings
 
@@ -91,17 +103,17 @@ Right-click the tray icon → **Settings**.
 | Tab | What's there |
 |---|---|
 | **Jev** | TypeSafe API key and model, the confidence thresholds for acting, dry run |
-| **AI planner** | Provider (off, OpenRouter, Ollama), model (**Load list** shows what's available), key or server URL, when to use it (only when Jev is confused, or for every command), whether to send a screenshot (needs a vision model), and for Ollama whether to keep the model loaded in memory |
+| **AI planner** | Provider (off, OpenRouter, Ollama), model (**Load list** shows what's available), key or server URL, when to use it (only when Jev is confused, or for every command), whether to send a screenshot (needs a vision model), and for Ollama whether to keep the model loaded in memory. Choosing a different Ollama model and pressing **Test** or **Save** unloads the previous one and loads the new one. |
 | **PC search** | Search with PowerToys instead of the Start menu, and its shortcut (default `left alt+space`; **Record** captures a new one, **Detect** reads it from PowerToys) |
-| **Indicator** | Background and text colour, opacity, and the dot colour for each state. Changes preview live. |
+| **Indicator** | Background and text colour, opacity, the dot colour for each state, and its position (presets, **Drag…** to place it anywhere, or **Reset position**). Changes preview live. |
 
 ## Privacy
 
 - **Your voice never leaves your PC.** Whisper runs locally.
 - **Sent to TypeSafe for each decision:** your transcribed command, the active window's title and the text
   OCR read on screen. No screenshots are sent.
-- **Sent to the AI planner, only when it's used:** the same text, plus a screenshot if **Send a screenshot** is
-  on. With OpenRouter this goes to OpenRouter and the model's provider; with Ollama it stays on your PC.
+- **Sent to the AI planner, only when it's used:** the same text with each item's position on screen, plus a
+  screenshot if **Send a screenshot** is on. With OpenRouter this goes to OpenRouter and the model's provider; with Ollama it stays on your PC.
 - API keys are kept in Windows Credential Manager, never in files. Settings and logs are in
   `%APPDATA%\JevHarness`.
 

@@ -9,7 +9,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from ctypes import wintypes
 
-from .desktop import fullscreen_on_primary
+from .desktop import fullscreen_at, monitor_bounds
 
 _user32 = ctypes.windll.user32
 _KEY = "#010203"  # transparent colour key
@@ -25,6 +25,7 @@ DEFAULT_DOTS = {
     "error": "#ea4335",
     "question": "#8ab4f8",
 }
+_MOVE_TEXT = "Drag to move · double-click to drop it here"
 _CHECK_BG = "#3c4043"
 _CHECK_HOVER = "#34a853"
 _SW_HIDE, _SW_SHOWNOACTIVATE = 0, 4
@@ -64,9 +65,12 @@ def _base_window(root: tk.Tk) -> tk.Toplevel:
     return win
 
 
+POSITIONS = ("bottom-centre", "bottom-left", "bottom-right", "top-centre", "top-left", "top-right", "custom")
+
+
 class Overlay:
     HEIGHT = 34
-    MARGIN = 16  # gap above the taskbar
+    MARGIN = 16  # gap from the screen edge / taskbar
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -88,6 +92,12 @@ class Overlay:
         self.rect = (0, 0, 0, 0)
         self._dim_listening = _mix(self.dots["listening"], self.bg, 0.55)
         self.on_check = None  # called (on the Tk thread) when the user clicks ✓ "it's done"
+        # Where it sits: a preset on the main screen, or "custom" = centred on (custom_x, custom_y) anywhere.
+        self.position = "bottom-centre"
+        self.custom_x = self.custom_y = 0
+        self._moving = None  # while being dragged: the callback for the new (x, y); see start_move()
+        self._align = "left"  # which way the text currently grows from the dot; see _anchor()
+        self._drag_from = (0, 0)
         c = self.canvas
         c.tag_bind("check", "<Button-1>", lambda _: self.on_check and self.on_check())
         c.tag_bind("check", "<Enter>", lambda _: (c.itemconfigure("check_bg", fill=_CHECK_HOVER), c.configure(cursor="hand2")))
@@ -101,47 +111,188 @@ class Overlay:
     def show(self, state: str, text: str, hold_ms: int | None = None, check: bool = False) -> None:
         """Display a state; empty text shows just the dot. With hold_ms, return to idle afterwards.
         With check, add a ✓ button on the right for "it's done, stop" (calls on_check)."""
+        if self._moving and not text.startswith(_MOVE_TEXT):
+            self._last = (state, text, check)  # shown once the move is finished
+            return
         if self._revert_job:
             self.root.after_cancel(self._revert_job)
             self._revert_job = None
         self.state = state
         self._text = text
-        self._last = (state, text, check)
+        if not self._moving:
+            self._last = (state, text, check)
         if self._hidden and not (state == self.idle_state and text == self.idle_text):
             _user32.ShowWindow(self.hwnd, _SW_SHOWNOACTIVATE)  # something to say: show even over fullscreen
             self._hidden = False
-        text = text if len(text) <= 150 else text[:149] + "…"
+        text = text if len(text) <= 1000 else text[:999] + "…"
         check = check and bool(text)
+        ax, ay, align = self._anchor()
+        self._align = align
+        # On the right of the screen the pill is mirrored: dot on the right, text growing to its left, ✓ at the left.
+        mirrored = align == "right"
         c = self.canvas
         c.delete("all")
         if text:
-            h = self.HEIGHT
-            w = min(1400, self.font.measure(text) + 46) + (self.CHECK_W if check else 0)
-            r = h // 2
-            c.create_oval(0, 0, h, h, fill=self.bg, outline=self.bg)
-            c.create_oval(w - h, 0, w, h, fill=self.bg, outline=self.bg)
-            c.create_rectangle(r, 0, w - r, h, fill=self.bg, outline=self.bg)
-            c.create_oval(14, r - 5, 24, r + 5, fill=self.dots[state], outline="", tags="dot")
-            c.create_text(32, r, text=text, anchor="w", fill=self.fg, font=self.font)
-            if check:
-                cx, rr = w - r, r - 6
-                c.create_oval(cx - rr, r - rr, cx + rr, r + rr, fill=_CHECK_BG, outline="", tags=("check", "check_bg"))
-                c.create_text(cx, r, text="✓", fill="#ffffff", font=("Segoe UI", 11, "bold"), tags="check")
+            w, h, dot_y = self._draw_text(text, state, check, mirrored, ax, ay)
         else:
             h = w = self.DOT
+            dot_y = h // 2
             c.create_oval(0, 0, w, h, fill=self.bg, outline=self.bg)
             c.create_oval(5, 5, w - 5, h - 5, fill=self.dots[state], outline="", tags="dot")
         c.configure(width=w, height=h)
-        left, _, right, bottom = _work_area()
-        x = left + (right - left - w) // 2
-        y = bottom - h - self.MARGIN - (self.HEIGHT - h) // 2  # dot sits where the pill's centre would be
+        x, y = self._place(w, dot_y, ax, ay, align)
         self.win.geometry(f"{w}x{h}{x:+d}{y:+d}")
         self.rect = (x, y, x + w, y + h)
-        self._set_clickable(check)
+        self._set_clickable(check or bool(self._moving))
         if hold_ms:
             self._revert_job = self.root.after(hold_ms, lambda: self.show(self.idle_state, self.idle_text))
 
     CHECK_W = 30  # extra pill width for the ✓ button
+    PAD_X = 32  # text inset from the dot end (the dot sits in the first 32 px)
+    PAD_Y = 8  # extra top/bottom padding on multi-line boxes
+
+    def _draw_text(self, text: str, state: str, check: bool, mirrored: bool, ax: int, ay: int) -> tuple[int, int, int]:
+        """Draw a pill (one line) or a rounded box (several lines) for `text`; returns (width, height, dot_y).
+
+        Lines are separated by "\n" and wrapped to the room left between the dot and the far edge of the screen,
+        so the box is always wide enough and never runs off it. Rows read top to bottom; the dot stays on its
+        anchor, on the first row (or the last near the bottom of the screen), so the box never goes under the
+        taskbar.
+        """
+        c = self.canvas
+        left, top, right, bottom = monitor_bounds(ax, ay)
+        room = (ax + self._DOT_X - left - self.MARGIN) if mirrored else (right - self.MARGIN - (ax - self._DOT_X))
+        extra = self.CHECK_W if check else 0
+        max_text = max(200, room - self.PAD_X - 14 - extra)
+        first, *rest = text.split("\n")
+        header = self._wrap(first, max_text)
+        body = [row for line in rest for row in self._wrap(line, max_text)]
+        rows = header + body  # always read top to bottom
+        line_h = self.font.metrics("linespace") + 4
+        single = len(rows) == 1
+        h = self.HEIGHT if single else len(rows) * line_h + 2 * self.PAD_Y
+        w = max(self.font.measure(row) for row in rows) + self.PAD_X + 14 + extra
+        centre = (lambda i: h // 2) if single else (lambda i: self.PAD_Y + i * line_h + line_h // 2)
+        # The dot (the fixed anchor) sits on the first row, or on the last one near the bottom of the screen,
+        # so the box grows away from the nearer edge and never goes under the taskbar.
+        dot_row = len(rows) - 1 if ay > (top + bottom) / 2 else 0
+        dot_y = centre(dot_row)
+
+        radius = h // 2 if single else 14
+        self._round_rect(0, 0, w, h, radius)
+        dot_x = w - self._DOT_X if mirrored else self._DOT_X
+        c.create_oval(dot_x - 5, dot_y - 5, dot_x + 5, dot_y + 5, fill=self.dots[state], outline="", tags="dot")
+        text_x = 14 + extra if mirrored else self.PAD_X  # mirrored: dot on the right, text still left-aligned
+        for i, row in enumerate(rows):
+            c.create_text(text_x, centre(i), text=row, anchor="w", fill=self.fg, font=self.font)
+        if check:
+            half = self.HEIGHT // 2
+            cx, rr = (half if mirrored else w - half), half - 6
+            c.create_oval(cx - rr, dot_y - rr, cx + rr, dot_y + rr, fill=_CHECK_BG, outline="", tags=("check", "check_bg"))
+            c.create_text(cx, dot_y, text="✓", fill="#ffffff", font=("Segoe UI", 11, "bold"), tags="check")
+        return w, h, dot_y
+
+    def _wrap(self, line: str, max_w: int) -> list[str]:
+        """Word-wrap one line to max_w pixels (very long words are split)."""
+        rows, row = [], ""
+        for word in line.split(" "):
+            candidate = f"{row} {word}" if row else word
+            if self.font.measure(candidate) <= max_w:
+                row = candidate
+                continue
+            if row:
+                rows.append(row)
+            while self.font.measure(word) > max_w:  # a single word wider than the box
+                cut = max(1, int(len(word) * max_w / self.font.measure(word)) - 1)
+                rows.append(word[:cut])
+                word = word[cut:]
+            row = word
+        rows.append(row)
+        return rows
+
+    def _round_rect(self, x0: int, y0: int, x1: int, y1: int, r: int) -> None:
+        c, fill = self.canvas, self.bg
+        r = min(r, (x1 - x0) // 2, (y1 - y0) // 2)
+        c.create_rectangle(x0 + r, y0, x1 - r, y1, fill=fill, outline=fill)
+        c.create_rectangle(x0, y0 + r, x1, y1 - r, fill=fill, outline=fill)
+        for cx, cy in ((x0, y0), (x1 - 2 * r, y0), (x0, y1 - 2 * r), (x1 - 2 * r, y1 - 2 * r)):
+            c.create_oval(cx, cy, cx + 2 * r, cy + 2 * r, fill=fill, outline=fill)
+
+    _DOT_X = 19  # the dot's centre, measured from the pill's dot end
+
+    def _anchor(self) -> tuple[int, int, str]:
+        """Where the dot sits (it never moves), and which way the text grows from it: "left" means the dot is
+        on the left of the pill and the text grows rightwards; "right" is mirrored, growing leftwards. A dragged
+        ("custom") position grows away from the nearer edge of its monitor, so it never runs off the screen."""
+        if self.position == "custom":
+            ax, ay = self.custom_x, self.custom_y
+            left, _, right, _ = monitor_bounds(ax, ay)
+            return ax, ay, "right" if ax > (left + right) / 2 else "left"
+        left, top, right, bottom = _work_area()
+        vertical, horizontal = self.position.split("-")
+        ay = top + self.MARGIN + self.HEIGHT // 2 if vertical == "top" else bottom - self.MARGIN - self.HEIGHT // 2
+        if horizontal == "left":
+            return left + self.MARGIN + self._DOT_X, ay, "left"
+        if horizontal == "right":
+            return right - self.MARGIN - self._DOT_X, ay, "right"
+        return (left + right) // 2, ay, "left"
+
+    def _place(self, w: int, dot_y: int, ax: int, ay: int, align: str) -> tuple[int, int]:
+        """Top-left corner for a box of width w (or the idle dot) whose dot, dot_y from its top, lands exactly
+        on the anchor."""
+        y = ay - dot_y
+        if w == self.DOT:
+            return ax - w // 2, y
+        return (ax - self._DOT_X if align == "left" else ax - (w - self._DOT_X)), y
+
+    def set_position(self, position: str, x: int = 0, y: int = 0) -> None:
+        if self._moving:
+            return  # being dragged: the drag decides where it goes
+        self.position = position if position in POSITIONS else "bottom-centre"
+        self.custom_x, self.custom_y = x, y
+        state, text, check = self._last
+        self.show(state, text, check=check)
+
+    def start_move(self, on_done) -> None:
+        """Let the user drag the pill anywhere (any monitor); a double-click drops it there and calls
+        on_done(x, y) with its new centre. It takes clicks while being moved, but still never takes focus."""
+        self.custom_x, self.custom_y, _ = self._anchor()  # start from where it is now
+        self.position = "custom"
+        self._moving = on_done
+        c = self.canvas
+        c.bind("<ButtonPress-1>", self._drag_start)
+        c.bind("<B1-Motion>", self._drag)
+        c.bind("<Double-Button-1>", lambda _: self.finish_move())
+        c.configure(cursor="fleur")
+        self.show("question", _MOVE_TEXT)
+
+    def _drag_start(self, e) -> None:
+        self._drag_from = (e.x_root - self.custom_x, e.y_root - self.custom_y)
+
+    def _drag(self, e) -> None:
+        self.custom_x, self.custom_y = e.x_root - self._drag_from[0], e.y_root - self._drag_from[1]
+        ax, ay, align = self._anchor()
+        if align != self._align:
+            self.show("question", _MOVE_TEXT)  # crossed the middle of the screen: flip the layout
+            return
+        w, h = self.rect[2] - self.rect[0], self.rect[3] - self.rect[1]
+        x, y = self._place(w, h // 2, ax, ay, align)
+        self.win.geometry(f"{w}x{h}{x:+d}{y:+d}")
+        self.rect = (x, y, x + w, y + h)
+
+    def finish_move(self, keep: bool = True) -> None:
+        """Drop the pill where it is (calling the start_move callback), or with keep=False abandon the move."""
+        if self._moving is None:
+            return
+        on_done, self._moving = (self._moving if keep else None), None
+        c = self.canvas
+        for seq in ("<ButtonPress-1>", "<B1-Motion>", "<Double-Button-1>"):
+            c.unbind(seq)
+        c.configure(cursor="")
+        state, text, check = self._last
+        self.show(state, text, check=check)
+        if on_done:
+            on_done(self.custom_x, self.custom_y)
 
     def apply_style(self, bg: str, fg: str, opacity: int, dots: dict[str, str]) -> None:
         """Set the pill's colours and opacity (percent) and redraw what's showing."""
@@ -170,10 +321,11 @@ class Overlay:
 
     def _keep_on_top(self) -> None:
         """Stay above other windows (re-asserted every second, since the taskbar and Start menu can cover it),
-        but get out of the way of fullscreen apps and games on the main screen while idle. While the user is
-        actively using it (listening, working, asking, showing a result) it stays visible even then."""
-        idle = self.state == self.idle_state and self._text == self.idle_text
-        hide = idle and fullscreen_on_primary()
+        but get out of the way of a fullscreen app or game on its monitor while idle. While the user is
+        actively using it (listening, working, asking, showing a result, being moved) it stays visible even then."""
+        idle = self.state == self.idle_state and self._text == self.idle_text and not self._moving
+        l, t, r, b = self.rect
+        hide = idle and fullscreen_at((l + r) // 2, (t + b) // 2)
         if hide != self._hidden:
             _user32.ShowWindow(self.hwnd, _SW_HIDE if hide else _SW_SHOWNOACTIVATE)
             self._hidden = hide

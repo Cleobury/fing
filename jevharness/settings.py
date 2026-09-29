@@ -44,6 +44,9 @@ class Settings:
     overlay_fg: str = "#f1f3f4"
     overlay_opacity: int = 100  # percent
     overlay_dots: dict = field(default_factory=dict)  # state -> colour, overriding the defaults
+    overlay_position: str = "bottom-centre"  # a preset on the main screen, or "custom" (dragged there)
+    overlay_x: int = 0  # custom position: the pill's centre, in screen pixels
+    overlay_y: int = 0
 
     @classmethod
     def load(cls) -> Settings:

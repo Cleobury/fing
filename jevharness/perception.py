@@ -44,6 +44,33 @@ class Screen:
     shot: object = None  # the mss screenshot, for the AI planner's vision input
 
 
+# Named parts of a monitor for a closer look, as fractions (left, top, right, bottom). Overlapping on purpose,
+# so a control on a boundary is whole in at least one of them.
+REGIONS = {
+    "top-left": (0, 0, 0.5, 0.5), "top-right": (0.5, 0, 1, 0.5),
+    "bottom-left": (0, 0.5, 0.5, 1), "bottom-right": (0.5, 0.5, 1, 1),
+    "top": (0, 0, 1, 0.35), "bottom": (0, 0.65, 1, 1), "left": (0, 0, 0.35, 1), "right": (0.65, 0, 1, 1),
+    "centre": (0.2, 0.2, 0.8, 0.8),
+}
+
+
+def region_box(name: str, width: int, height: int) -> tuple[int, int, int, int]:
+    fx0, fy0, fx1, fy1 = REGIONS.get(name, (0, 0, 1, 1))
+    return int(fx0 * width), int(fy0 * height), int(fx1 * width), int(fy1 * height)
+
+
+def merge_elements(screen: Screen, extra: list[Element]) -> Screen:
+    """The screen plus newly found elements (e.g. from a closer look), skipping ones already there."""
+    def same(a: Element, b: Element) -> bool:
+        return a.text.lower() == b.text.lower() and abs(a.center[0] - b.center[0]) < 40 and abs(a.center[1] - b.center[1]) < 40
+
+    merged = list(screen.elements)
+    for el in extra:
+        if not any(same(el, m) for m in merged):
+            merged.append(Element(f"e{len(merged) + 1}", el.text, el.left, el.top, el.width, el.height))
+    return Screen(screen.monitor, screen.window_title, merged, screen.ocr_ms, screen.shot)
+
+
 def _intersects(a, b) -> bool:
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
@@ -54,10 +81,13 @@ class Perception:
         if self._engine is None:
             raise RuntimeError("Windows OCR is unavailable: add an OCR-capable language in Settings > Time & language")
 
-    def capture(self, exclude: list[tuple[int, int, int, int]] = (), follow: str = "cursor") -> Screen:
+    def capture(self, exclude: list[tuple[int, int, int, int]] = (), follow: str = "cursor",
+                scale: float = 1.0, region: str | None = None) -> Screen:
         """OCR the monitor under the mouse (follow="cursor") or holding the active window (follow="foreground").
 
-        Elements overlapping `exclude` rects (our own overlay) are dropped.
+        Elements overlapping `exclude` rects (our own overlay) are dropped. For a closer look, `scale` enlarges
+        the image before OCR (small text it would otherwise miss) and `region` (see REGIONS) limits it to part
+        of the monitor. Element positions are always real screen pixels.
         """
         t0 = time.perf_counter()
         title = foreground_window_title()
@@ -66,11 +96,24 @@ class Perception:
             mon = monitor_at(sct.monitors[1:], *point)
             shot = sct.grab(mon)
 
+        ox, oy = mon["left"], mon["top"]
+        if scale == 1.0 and region is None:
+            data, width, height = bytes(shot.bgra), shot.width, shot.height
+        else:
+            from PIL import Image
+
+            img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+            if region is not None:
+                x0, y0, x1, y1 = region_box(region, shot.width, shot.height)
+                img = img.crop((x0, y0, x1, y1))
+                ox, oy = ox + x0, oy + y0
+            scale = min(scale, (OcrEngine.max_image_dimension - 1) / max(img.size))  # the OCR engine's size limit
+            img = img.resize((round(img.width * scale), round(img.height * scale)), Image.LANCZOS)
+            data, (width, height) = img.convert("RGBA").tobytes("raw", "BGRA"), img.size
+
         writer = DataWriter()
-        writer.write_bytes(bytes(shot.bgra))
-        bitmap = SoftwareBitmap.create_copy_from_buffer(
-            writer.detach_buffer(), BitmapPixelFormat.BGRA8, shot.width, shot.height
-        )
+        writer.write_bytes(data)
+        bitmap = SoftwareBitmap.create_copy_from_buffer(writer.detach_buffer(), BitmapPixelFormat.BGRA8, width, height)
         result = asyncio.run(self._recognize(bitmap))
 
         elements: list[Element] = []
@@ -83,10 +126,10 @@ class Perception:
                 el = Element(
                     id=f"e{len(elements) + 1}",
                     text=" ".join(w.text for w in words),
-                    left=mon["left"] + int(min(xs)),
-                    top=mon["top"] + int(min(ys)),
-                    width=int(max(x2) - min(xs)),
-                    height=int(max(y2) - min(ys)),
+                    left=ox + int(min(xs) / scale),
+                    top=oy + int(min(ys) / scale),
+                    width=int((max(x2) - min(xs)) / scale),
+                    height=int((max(y2) - min(ys)) / scale),
                 )
                 if not any(_intersects(el.rect, r) for r in exclude):
                     elements.append(el)

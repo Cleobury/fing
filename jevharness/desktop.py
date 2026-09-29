@@ -148,9 +148,17 @@ class _MONITORINFO(ctypes.Structure):
     _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
 
 
-def fullscreen_on_primary() -> bool:
-    """Whether the active window covers the whole primary monitor: exclusive fullscreen games, borderless
-    "windowed fullscreen", fullscreen video. The desktop itself doesn't count."""
+def monitor_bounds(x: int, y: int) -> tuple[int, int, int, int]:
+    """(left, top, right, bottom) of the monitor containing (x, y), or the nearest one."""
+    mi = _MONITORINFO(cbSize=ctypes.sizeof(_MONITORINFO))
+    _user32.GetMonitorInfoW(_user32.MonitorFromPoint(wintypes.POINT(x, y), 2), ctypes.byref(mi))
+    m = mi.rcMonitor
+    return m.left, m.top, m.right, m.bottom
+
+
+def fullscreen_at(x: int, y: int) -> bool:
+    """Whether the active window covers the whole monitor containing (x, y): exclusive fullscreen games,
+    borderless "windowed fullscreen", fullscreen video. The desktop itself doesn't count."""
     hwnd = _user32.GetForegroundWindow()
     if not hwnd:
         return False
@@ -158,12 +166,12 @@ def fullscreen_on_primary() -> bool:
     _user32.GetClassNameW(hwnd, cls, 64)
     if cls.value in _SHELL_CLASSES:
         return False
-    primary = _user32.MonitorFromPoint(wintypes.POINT(0, 0), 1)  # MONITOR_DEFAULTTOPRIMARY
-    if _user32.MonitorFromWindow(hwnd, 2) != primary:  # MONITOR_DEFAULTTONEAREST
+    monitor = _user32.MonitorFromPoint(wintypes.POINT(x, y), 2)  # MONITOR_DEFAULTTONEAREST
+    if _user32.MonitorFromWindow(hwnd, 2) != monitor:
         return False
     mi = _MONITORINFO(cbSize=ctypes.sizeof(_MONITORINFO))
     r = wintypes.RECT()
-    if not _user32.GetMonitorInfoW(primary, ctypes.byref(mi)) or not _user32.GetWindowRect(hwnd, ctypes.byref(r)):
+    if not _user32.GetMonitorInfoW(monitor, ctypes.byref(mi)) or not _user32.GetWindowRect(hwnd, ctypes.byref(r)):
         return False
     m = mi.rcMonitor
     return r.left <= m.left and r.top <= m.top and r.right >= m.right and r.bottom >= m.bottom

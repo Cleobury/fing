@@ -51,6 +51,8 @@ Rules:
   label is missing.
 - Only ask a `question` (with no steps) when you can't tell what the user *wants*, or when the request would delete data,
   spend money, send a message or change security settings and they haven't clearly asked for exactly that.
+- Whenever you ask a `question`, also give 2-4 short likely answers in `options` (they're shown numbered, so the
+  user can reply with a number). Otherwise `options` is empty.
 - If the request already looks done, return no steps and no question.
 - `understanding`: one short sentence restating the goal."""
 
@@ -59,6 +61,7 @@ SCHEMA = {
     "properties": {
         "understanding": {"type": "string"},
         "question": {"type": ["string", "null"]},
+        "options": {"type": "array", "items": {"type": "string"}},
         "steps": {
             "type": "array",
             "items": {
@@ -77,9 +80,68 @@ SCHEMA = {
             },
         },
     },
-    "required": ["understanding", "question", "steps"],
+    "required": ["understanding", "question", "options", "steps"],
     "additionalProperties": False,
 }
+
+
+EXPLORE_SYSTEM = """You help a voice-controlled computer assistant find its way around an app. It sees the screen only
+through OCR: the text elements in screen_elements, each with an id and where it is (and a screenshot, if given). It
+can't carry out `step` on the current screen: what it needs isn't visible, or it can't recognise it. Suggest up to 4
+probes to explore, most promising first. The assistant tries them one at a time and re-reads the screen after each.
+
+Probes:
+- click / double_click / right_click: element = the id of a visible element (e.g. "e12"). Good: tabs, sidebar and
+  menu items, "More", "...", "Show all", section headers that expand, a profile or app-menu button.
+- scroll: direction "up" or "down", to reveal more of the current page or list.
+- press_key: key, e.g. "escape" (close a popup or menu), "alt+left" (go back), "ctrl+f" (find), "tab", "f10"
+  (menu bar), "alt+space" (window menu).
+- zoom: region = one of top-left, top-right, bottom-left, bottom-right, top, bottom, left, right, centre. Re-reads
+  that part of the screen more closely, to find small text or controls OCR missed (often icon bars and corners).
+
+Rules:
+- Think about where this app usually keeps what the step needs, and aim there.
+- Don't repeat anything in `tried`; learn from their results.
+- Never click anything that deletes, removes, uninstalls, buys, pays, sends, posts, signs out, or changes security
+  or privacy settings.
+- `thinking`: one short sentence on where you expect to find it."""
+
+EXPLORE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "thinking": {"type": "string"},
+        "probes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["click", "double_click", "right_click", "scroll", "press_key", "zoom"]},
+                    "element": {"type": ["string", "null"]},
+                    "key": {"type": ["string", "null"]},
+                    "direction": {"type": ["string", "null"]},
+                    "region": {"type": ["string", "null"]},
+                    "reason": {"type": "string"},
+                },
+                "required": ["action", "element", "key", "direction", "region", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["thinking", "probes"],
+    "additionalProperties": False,
+}
+
+
+def describe_elements(screen: Screen, limit: int = 250) -> list[dict]:
+    """OCR elements for the AI: id, text and position (a region name plus the centre in screen pixels)."""
+    mon = screen.monitor
+    out = []
+    for e in screen.elements[:limit]:
+        cx, cy = e.center
+        h = ("left", "centre", "right")[min(2, max(0, 3 * (cx - mon["left"]) // mon["width"]))]
+        v = ("top", "middle", "bottom")[min(2, max(0, 3 * (cy - mon["top"]) // mon["height"]))]
+        out.append({"id": e.id, "text": e.text[:80], "where": f"{v} {h}", "x": cx - mon["left"], "y": cy - mon["top"]})
+    return out
 
 
 @dataclass
@@ -87,6 +149,7 @@ class LlmPlan:
     understanding: str
     steps: list[str]  # plain commands for the Jev step loop
     question: str | None
+    options: list[str]  # likely answers to `question`, shown numbered
     raw: dict
 
 
@@ -162,7 +225,7 @@ class Planner:
             "steps_done": steps_done,
             "problem": problem,
             "active_window": screen.window_title,
-            "screen_elements": [e.text for e in screen.elements][:250],
+            "screen_elements": describe_elements(screen),
             "user_answers": [{"question": q, "answer": a} for q, a in answers],
         }
         content: list[dict] = [{"type": "text", "text": json.dumps(context, ensure_ascii=False)}]
@@ -178,18 +241,93 @@ class Planner:
             body["provider"] = {"require_parameters": True}  # only route to endpoints that honour the schema
         data = self._chat(body)
         steps = [c for c in (to_command(s) for s in data.get("steps") or []) if c]
-        return LlmPlan(data.get("understanding") or "", steps, data.get("question") or None, data)
+        options = [o.strip() for o in data.get("options") or [] if isinstance(o, str) and o.strip()][:4]
+        return LlmPlan(data.get("understanding") or "", steps, data.get("question") or None, options, data)
 
-    def preload(self) -> None:
-        """Load the model now and pin it in memory, so the first command doesn't wait for it (Ollama keep-alive)."""
-        if self.keep_alive:
-            r = self.http.post(f"{self._ollama_root}/api/generate", json={"model": self.model, "keep_alive": -1},
-                               timeout=300)
-            r.raise_for_status()
+    # ---- Ollama model memory ----
 
-    def _chat(self, body: dict) -> dict:
+    @property
+    def ollama_id(self) -> tuple[str, str] | None:
+        """(server, model) for a local Ollama model, else None."""
+        return (self._ollama_root, self.model) if self.provider == "ollama" and self.model else None
+
+    def load(self) -> None:
+        """Load the model into memory now, so the next command doesn't wait for it. Pinned indefinitely with
+        keep_alive, otherwise under Ollama's default (unloaded after 5 minutes idle)."""
+        body: dict = {"model": self.model}
         if self.keep_alive:
-            return self._ollama_chat(body)
+            body["keep_alive"] = -1
+        r = self.http.post(f"{self._ollama_root}/api/generate", json=body, timeout=300)
+        if r.status_code >= 400:
+            try:
+                reason = r.json().get("error") or r.text
+            except ValueError:
+                reason = r.text
+            raise RuntimeError(reason)  # e.g. '"all-minilm:latest" does not support generate'
+
+    def ollama_capabilities(self, model: str) -> set[str]:
+        """What a local model can do, e.g. {"completion", "vision", "tools"} or {"embedding"}."""
+        r = self.http.post(f"{self._ollama_root}/api/show", json={"model": model})
+        r.raise_for_status()
+        return set(r.json().get("capabilities") or [])
+
+    @staticmethod
+    def running_ollama_models(root: str) -> set[str]:
+        r = httpx.get(f"{root}/api/ps", timeout=10)
+        r.raise_for_status()
+        return {m["name"] for m in r.json().get("models", [])}
+
+    @staticmethod
+    def unload_ollama_model(root: str, model: str) -> bool:
+        """Free a model's memory now. Returns False if it wasn't loaded (nothing to do)."""
+        if model not in Planner.running_ollama_models(root):
+            return False
+        httpx.post(f"{root}/api/generate", json={"model": model, "keep_alive": 0}, timeout=60).raise_for_status()
+        return True
+
+    def ping(self) -> None:
+        """A tiny request to check the model answers. For Ollama it goes through the native API, so testing a
+        pinned model doesn't reset it to the 5-minute default."""
+        if self.provider == "ollama":
+            body = {"model": self.model, "stream": False, "messages": [{"role": "user", "content": "Reply with the word ok."}],
+                    "options": {"num_predict": 5}}
+            if self.keep_alive:
+                body["keep_alive"] = -1
+            self.http.post(f"{self._ollama_root}/api/chat", json=body, timeout=300).raise_for_status()
+            return
+        self.http.post(f"{self.base_url}/chat/completions", json={
+            "model": self.model, "max_tokens": 5, "messages": [{"role": "user", "content": "Reply with the word ok."}],
+        }).raise_for_status()
+
+    def explore(self, step: str, request: str, done: list[str], screen: Screen, tried: list[dict]) -> tuple[str, list[dict]]:
+        """Suggest ways to explore the current screen for where `step` can be done. Returns (thinking, probes)."""
+        context = {
+            "step": step,
+            "full_request": request,
+            "steps_done": done,
+            "active_window": screen.window_title,
+            "screen_size": [screen.monitor["width"], screen.monitor["height"]],
+            "screen_elements": describe_elements(screen),
+            "tried": tried,
+        }
+        content: list[dict] = [{"type": "text", "text": json.dumps(context, ensure_ascii=False)}]
+        if self.send_screenshot and (url := _screenshot_data_url(screen)):
+            content.append({"type": "image_url", "image_url": {"url": url}})
+        body = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": EXPLORE_SYSTEM}, {"role": "user", "content": content}],
+            "temperature": 0.3,
+            "response_format": {"type": "json_schema", "json_schema": {"name": "explore", "strict": True, "schema": EXPLORE_SCHEMA}},
+        }
+        if self.provider == "openrouter":
+            body["provider"] = {"require_parameters": True}
+        data = self._chat(body, EXPLORE_SCHEMA)
+        probes = [p for p in data.get("probes") or [] if isinstance(p, dict) and p.get("action")][:4]
+        return data.get("thinking") or "", probes
+
+    def _chat(self, body: dict, schema: dict = SCHEMA) -> dict:
+        if self.keep_alive:
+            return self._ollama_chat(body, schema)
         r = self.http.post(f"{self.base_url}/chat/completions", json=body)
         if r.status_code == 400 and "response_format" in body:
             # Local/older models may reject JSON-schema mode: fall back to plain JSON mode, then prompt-only.
@@ -203,7 +341,7 @@ class Planner:
         r.raise_for_status()
         return _parse_json(r.json()["choices"][0]["message"]["content"])
 
-    def _ollama_chat(self, body: dict) -> dict:
+    def _ollama_chat(self, body: dict, schema: dict = SCHEMA) -> dict:
         """The same request through Ollama's native /api/chat, which honours keep_alive."""
         messages = []
         for m in body["messages"]:
@@ -220,7 +358,7 @@ class Planner:
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "format": SCHEMA,
+            "format": schema,
             "keep_alive": -1,
             "options": {"temperature": body.get("temperature", 0.2)},
         })
@@ -229,10 +367,12 @@ class Planner:
 
     def list_models(self) -> list[str]:
         if self.provider == "ollama":
-            # Native Ollama endpoint, not the /v1 compatibility layer.
-            r = self.http.get(self.base_url.removesuffix("/v1") + "/api/tags")
+            # Native Ollama endpoint, not the /v1 compatibility layer. Only models that can generate text:
+            # embedding models (e.g. all-minilm) can't plan.
+            r = self.http.get(f"{self._ollama_root}/api/tags")
             r.raise_for_status()
-            return sorted(m["name"] for m in r.json().get("models", []))
+            names = sorted(m["name"] for m in r.json().get("models", []))
+            return [n for n in names if "completion" in self.ollama_capabilities(n)]
         r = self.http.get(f"{self.base_url}/models")
         r.raise_for_status()
         models = r.json()["data"]

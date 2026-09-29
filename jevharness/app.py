@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 import tkinter as tk
@@ -42,11 +43,13 @@ from .decide import (
 )
 from .desktop import (
     find_app_window,
+    foreground_center,
     foreground_is,
     foreground_window,
     wait_until_settled,
 )
 from .llm import PROVIDERS, Planner
+from .search import valid_hotkey
 from .overlay import Highlight, Overlay
 from .settings import LOG_DIR, Settings, get_api_key
 from .settings_dialog import SettingsDialog
@@ -77,8 +80,39 @@ DONE_THRESHOLD = 0.5  # after the last step, keep going (Jev, else the AI planne
 LOADING = 0.5  # Jev's "screen is still loading" probability that makes a failing step wait
 JUST_ACTED_S = 3  # a step failing this soon after an action also waits, in case the screen hasn't caught up
 LOAD_WAIT_S = 5  # the longest a step waits for the screen to change before looking elsewhere
+EXPLORE_ACTIONS = 8  # actions (scrolls, clicks, keys, zooms) one step may spend exploring for its target
+EXPLORE_S = 60  # and the time
+EXPLORE_ROUNDS = 3  # rounds of AI suggestions
+# Exploration never clicks controls like these, whatever the AI suggests, nor presses keys that close things.
+_DANGEROUS = re.compile(r"\b(delete|remove|uninstall|erase|format|reset|buy|purchase|pay|checkout|order|send|post|"
+                        r"publish|share|sign ?out|log ?out|unsubscribe|discard|revoke)\b", re.I)
+_BLOCKED_KEYS = {"alt+f4", "ctrl+w", "ctrl+q", "ctrl+shift+w", "delete", "shift+delete", "windows+l", "ctrl+alt+delete"}
 CONTINUE = object()  # pending-step marker: let Jev choose the next action toward the whole request
 PLANNER_ERROR = object()  # _replan result when the AI call itself failed
+TRY_AGAIN = object()  # "I'm stuck" answer: carry on with no new guidance
+_CANCEL = object()  # the Cancel option every question ends with
+
+_NUMBER_WORDS = {"one": 1, "first": 1, "two": 2, "second": 2, "three": 3, "third": 3, "four": 4, "fourth": 4,
+                 "five": 5, "fifth": 5, "six": 6, "sixth": 6, "seven": 7, "seventh": 7, "eight": 8, "eighth": 8,
+                 "nine": 9, "ninth": 9, "1st": 1, "2nd": 2, "3rd": 3}
+_SOUNDALIKES = {"won": 1, "to": 2, "too": 2, "tree": 3, "for": 4, "fore": 4, "ate": 8}  # only as the whole answer
+_CANCEL_WORDS = {"cancel", "stop", "nevermind", "never mind", "none", "no", "none of them", "none of those"}
+
+
+def spoken_choice(answer: str, n: int) -> int | None:
+    """Option index (0-based) for a short spoken answer like "two", "number 2", "the second one" or "cancel"
+    (the last option); None if it isn't a number answer, e.g. free text or an option's name."""
+    words = re.findall(r"[a-z0-9]+", answer.lower())
+    if not words or len(words) > 4:
+        return None
+    phrase = " ".join(words)
+    if phrase in _CANCEL_WORDS or phrase in ("the last one", "last one", "last"):
+        return n - 1
+    if len(words) == 1 and words[0] in _SOUNDALIKES:
+        number = _SOUNDALIKES[words[0]]
+    else:
+        number = next((int(w) if w.isdigit() else _NUMBER_WORDS[w] for w in words if w.isdigit() or w in _NUMBER_WORDS), None)
+    return number - 1 if number is not None and 1 <= number <= n else None
 
 
 @dataclass
@@ -121,6 +155,8 @@ class App:
         self._executing = False  # our own synthetic key presses mustn't count as "cancel"
         self._recent: collections.deque = collections.deque(maxlen=6)
         self._question: Question | None = None  # set while waiting for the user to answer
+        self._question_options: list[tuple[str, object]] = []
+        self._answer_keys: set[str] = set()
         self._answers: queue.Queue = queue.Queue()
         self._last_action_t = 0.0
         self._marked_done = False  # the user clicked ✓: stop, and report success rather than "stopped"
@@ -141,7 +177,12 @@ class App:
         self.tray = Tray(self)
         self.decider: Decider | None = None
         self.planner: Planner | None = None
+        self._ollama_lock = threading.Lock()
+        self._ollama_model: tuple[str, str] | None = None  # the local model the app is using: (server, name)
         self._rebuild_decider()
+        if self.planner and self.planner.ollama_id:
+            # At startup only load it if it's meant to be kept in memory; otherwise the first command loads it.
+            self.serve_model_in_background(self.planner, load=self.planner.keep_alive)
         self._ocr_pool = ThreadPoolExecutor(1, thread_name_prefix="ocr")
         self._work_pool = ThreadPoolExecutor(1, thread_name_prefix="work")
         self._llm_pool = ThreadPoolExecutor(2, thread_name_prefix="llm")
@@ -231,25 +272,73 @@ class App:
         key = get_api_key()
         self.decider = Decider(key, self.settings.model) if key else None
         self.planner = make_planner(self.settings)
-        if self.planner and self.planner.keep_alive:
-            threading.Thread(target=self._preload_planner, args=(self.planner,), daemon=True, name="llm-preload").start()
 
-    def _preload_planner(self, planner: Planner) -> None:
-        try:
-            t = time.perf_counter()
-            planner.preload()
-            log.info("Loaded %s and pinned it in memory (%.1f s)", planner.model, time.perf_counter() - t)
-        except Exception:
-            log.exception("Couldn't preload %s", planner.model)
+    def serve_model(self, planner: Planner | None, load: bool = True) -> str:
+        """Make `planner`'s local Ollama model the one in memory: unload the model the app was using before
+        (only if it's a different one and still loaded; other Ollama models are left alone), then load this
+        one. Pass None to just unload. Returns what happened, for status messages; load errors propagate."""
+        with self._ollama_lock:
+            new = planner.ollama_id if planner else None
+            changes = []
+            prev, self._ollama_model = self._ollama_model, new
+            if prev and prev != new:
+                try:
+                    if Planner.unload_ollama_model(*prev):
+                        changes.append(f"unloaded {prev[1]}")
+                except Exception:
+                    log.exception("Couldn't unload %s", prev[1])
+            if new and load:
+                t = time.perf_counter()
+                planner.load()
+                pinned = " and kept it in memory" if planner.keep_alive else ""
+                changes.append(f"loaded {new[1]}{pinned} ({time.perf_counter() - t:.1f} s)")
+            if changes:
+                log.info("Local model: %s", "; ".join(changes))
+            return "; ".join(changes)
+
+    def serve_model_in_background(self, planner: Planner | None, load: bool = True, announce: bool = False) -> None:
+        def run():
+            if announce and planner and planner.ollama_id and load:
+                self.status("thinking", f"Loading {planner.model}…", 60000)
+            try:
+                changes = self.serve_model(planner, load)
+                if announce and changes:
+                    self.status("done", "Local model: " + changes, 4000)
+            except Exception as e:
+                # Always say so: otherwise the AI planner silently doesn't work (e.g. an embedding-only model).
+                log.exception("Couldn't load %s", planner.model if planner else "")
+                self.status("error", f"AI planner model {planner.model} can't be used: {str(e)[:80]}", 8000)
+
+        threading.Thread(target=run, daemon=True, name="llm-serve").start()
 
     def apply_overlay_style(self, s: Settings | None = None) -> None:
         """Colour and opacity of the indicator, from `s` (e.g. a live preview) or the saved settings."""
         s = s or self.settings
         self.overlay.apply_style(s.overlay_bg, s.overlay_fg, s.overlay_opacity, s.overlay_dots)
+        self.overlay.set_position(s.overlay_position, s.overlay_x, s.overlay_y)
+
+    def move_overlay(self) -> None:
+        """Tray menu → Move indicator: drag it anywhere, double-click to drop; the spot is saved."""
+        def done(x: int, y: int) -> None:
+            self.settings.overlay_position, self.settings.overlay_x, self.settings.overlay_y = "custom", x, y
+            self.settings.save()
+            self.overlay.show("done", "Indicator moved", 1500)
+
+        self.overlay.start_move(done)
+
+    def reset_overlay_position(self) -> None:
+        """Tray menu → Reset indicator position: back to bottom centre, above the taskbar."""
+        self.overlay.finish_move(keep=False)
+        self.settings.overlay_position, self.settings.overlay_x, self.settings.overlay_y = "bottom-centre", 0, 0
+        self.settings.save()
+        self.apply_overlay_style()
+        self.overlay.show("done", "Indicator back in its default position", 2000)
 
     def on_settings_changed(self) -> None:
         self.apply_overlay_style()
         self._rebuild_decider()
+        # Serve the chosen local model now (unloading the previous one), or unload it if Ollama's no longer used.
+        self.serve_model_in_background(self.planner, announce=True)
         self._refresh_idle()
 
     def open_settings(self) -> None:
@@ -324,7 +413,7 @@ class App:
             self._show_waiting()
             return
         if self._question is not None:
-            self._answers.put(audio)  # the worker thread is blocked in _ask_user waiting for this
+            self._answers.put(("audio", audio))  # the worker thread is blocked in _ask_user waiting for this
             self.status("thinking", "Got it…")
             return
         self.busy = True
@@ -463,9 +552,12 @@ class App:
                 answer = self._ask_how_to_continue(command, problem, entry)
                 if answer is None:
                     break
-                guidance.append(("I'm stuck. What should I do next?", answer))
                 stuck = 0
-                if self.planner is None:
+                if answer is TRY_AGAIN:
+                    answer = None  # just have another go, with no new guidance
+                else:
+                    guidance.append(("I'm stuck. What should I do next?", answer))
+                if answer is not None and self.planner is None:
                     pending = [answer]  # Jev takes the user's instruction as the next step
                     continue
             pending = self._further_steps(command, done, screen, problem, guidance, entry)
@@ -498,11 +590,12 @@ class App:
         short = command if len(command) <= 50 else command[:49] + "…"
         prompt = (f"I didn't understand “{short}”. What should I do?" if NOT_UNDERSTOOD in problem
                   else f"I'm stuck on “{short}”. What should I do next?")
-        return self._ask_user(Question(prompt, "text", [], lambda s: s, []), "", entry)
+        options = [] if NOT_UNDERSTOOD in problem else [("Try again", TRY_AGAIN)]
+        return self._ask_user(Question(prompt, "text", options, lambda s: s, []), "", entry)
 
     def _keep_going(self, command: str, entry: dict) -> bool:
         short = command if len(command) <= 50 else command[:49] + "…"
-        q = Question(f"Still working on “{short}”. Keep going?", "choose", [("Keep going", True), ("Stop", False)], lambda v: v, [])
+        q = Question(f"Still working on “{short}”. Keep going?", "choose", [("Keep going", True)], lambda v: v, [])
         return bool(self._ask_user(q, "", entry))
 
     def _replan(self, command: str, done: list[str], screen: Screen, problem: str | None, entry: dict,
@@ -532,7 +625,7 @@ class App:
             entry["replans"].append({"problem": problem, "ms": round((time.perf_counter() - t) * 1000),
                                      "understanding": lp.understanding, "steps": lp.steps, "question": lp.question})
             if lp.question and not lp.steps:
-                answer = self._ask_user(Question(lp.question, "text", [], lambda s: s, []), "", entry)
+                answer = self._ask_user(Question(lp.question, "text", [(o, o) for o in lp.options], lambda s: s, []), "", entry)
                 if answer is None:
                     return None
                 answers.append((lp.question, answer))
@@ -582,10 +675,15 @@ class App:
                 wait_until = 0
 
             if nav is None or hop == MAX_NAV_HOPS or self._cancel.is_set():
+                if not self.settings.dry_run and not self._cancel.is_set():
+                    # Not apparent from here: look harder before giving up or handing over to the AI planner.
+                    explored = self._explore(step, label, screen, context, entry, tried)
+                    if explored is not None:
+                        return explored
                 if p.target:
                     self.ui(self.highlight.flash, p.target.rect, 1500, "#fbbc04")
                 where = f" (looked in {', '.join(tried)})" if tried else ""
-                return StepOutcome(None, p.description + where, screen)
+                return StepOutcome(None, p.description + where + (" after exploring" if not self.settings.dry_run else ""), screen)
             if self.settings.dry_run:
                 self.ui(self.highlight.flash, nav.rect, 2000, "#fbbc04")
                 self.status("done", f'Would click "{nav.text[:40]}" to look for it', 4000)
@@ -596,6 +694,183 @@ class App:
             self.status("thinking", f'{label}Not here: trying "{nav.text[:40]}"')
             wait_until_settled(6, self._cancel.is_set)
             screen = self.perception.capture([self.overlay.rect], follow="foreground")
+
+    # ---- exploring ----------------------------------------------------------------
+
+    def _explore(self, step: str, label: str, screen: Screen, context: dict, entry: dict,
+                 nav_tried: list[str]) -> StepOutcome | None:
+        """The step's target isn't apparent: look harder, cheapest first.
+
+        1. A closer look: OCR the screen at 2x, which finds small text the normal pass misses.
+        2. Scroll the window down (up to 2 pages), re-reading each time; scroll back if that didn't help.
+        3. With an AI planner: it sees the OCR elements with their positions (and the screenshot), and suggests
+           probes (click a tab or menu, press a key, scroll, or zoom into a region for a closer look). After
+           each probe the screen is re-read and Jev checks whether the step can be done now; the AI sees what
+           each probe did before suggesting more.
+
+        Returns the step's outcome once Jev can do it (or asks the user), or None if nothing turned it up.
+        Bounded by EXPLORE_ACTIONS and EXPLORE_S; Esc stops it.
+        """
+        from .perception import merge_elements  # WinRT: only importable once Whisper has loaded
+
+        record: list = entry.setdefault("explore", [])
+        deadline = time.monotonic() + EXPLORE_S
+        tried: list[dict] = [{"probe": f'clicked "{t}"', "result": "didn't reveal it"} for t in nav_tried]
+        actions = 0
+
+        def check(scr: Screen, how: str) -> StepOutcome | None:
+            answers, targets, texts, apps = self.decider.ask(step, scr, self.installed_apps, {**context, "navigation_tried": nav_tried})
+            found = plan(answers, targets, texts, apps, self.settings.min_action_prob, self.settings.min_target_prob)
+            record.append({"how": how, "window": scr.window_title, "elements": len(scr.elements), "plan": found.description, "ok": found.ok})
+            if found.ok:
+                return StepOutcome(found, None, scr)
+            if found.question is not None:
+                return StepOutcome(self._ask_user(found.question, label, entry), None, scr)
+            return None
+
+        def seen(scr: Screen) -> tuple:
+            return scr.window_title, frozenset(e.text for e in scr.elements)
+
+        def out_of_budget() -> bool:
+            return self._cancel.is_set() or time.monotonic() > deadline or actions >= EXPLORE_ACTIONS
+
+        # 1. A closer look.
+        self.status("thinking", f"{label}Exploring: looking closer…")
+        closer = merge_elements(screen, self.perception.capture([self.overlay.rect], follow="foreground", scale=2.0).elements)
+        if len(closer.elements) > len(screen.elements):
+            if found := check(closer, f"closer look (+{len(closer.elements) - len(screen.elements)} items)"):
+                return found
+            screen = closer
+        tried.append({"probe": "read the whole screen more closely", "result": "still not found"})
+
+        # 2. Scroll down through the window.
+        centre = foreground_center()
+        scrolled = 0
+        if centre:
+            current = screen
+            for _ in range(2):
+                if out_of_budget():
+                    return None
+                self.status("thinking", f"{label}Exploring: scrolling down…")
+                self._executing = True
+                try:
+                    executor.scroll_at(*centre, -5)
+                finally:
+                    self._executing = False
+                actions += 1
+                wait_until_settled(1.5, self._cancel.is_set)
+                after = self.perception.capture([self.overlay.rect], follow="foreground")
+                if seen(after) == seen(current):
+                    break  # nothing scrolled
+                scrolled += 1
+                if found := check(after, f"scrolled down {scrolled}"):
+                    return found
+                current = after
+            if scrolled:
+                tried.append({"probe": f"scrolled down {scrolled} page(s)", "result": "still not found; scrolled back up"})
+                self._executing = True
+                try:
+                    executor.scroll_at(*centre, 5 * scrolled)
+                finally:
+                    self._executing = False
+                wait_until_settled(1.5, self._cancel.is_set)
+                screen = merge_elements(self.perception.capture([self.overlay.rect], follow="foreground"), closer.elements) \
+                    if seen(current) != seen(screen) else screen
+
+        # 3. Let the AI suggest where to look.
+        if self.planner is None:
+            return None
+        current = screen
+        for _ in range(EXPLORE_ROUNDS):
+            if out_of_budget():
+                return None
+            self.status("thinking", f"{label}Exploring with {self.planner.name}…  Esc to cancel")
+            result = self._run_llm(self.planner.explore, step, context.get("full_request", step),
+                                   context.get("steps_done", []), current, tried)
+            if result is None:
+                return None
+            thinking, probes = result
+            record.append({"ai": thinking, "probes": probes})
+            for probe in probes:
+                if out_of_budget():
+                    return None
+                desc = self._run_probe(probe, current, label)
+                if desc is None:
+                    tried.append({"probe": probe, "result": "not allowed, or no such element"})
+                    continue
+                actions += 1
+                if probe.get("action") == "zoom":
+                    zoomed = self.perception.capture([self.overlay.rect], follow="foreground", scale=3.0, region=probe.get("region"))
+                    after = merge_elements(current, zoomed.elements)
+                else:
+                    wait_until_settled(3, self._cancel.is_set)
+                    after = self.perception.capture([self.overlay.rect], follow="foreground")
+                if found := check(after, desc):
+                    return found
+                changed = seen(after) != seen(current)
+                tried.append({"probe": desc, "result": "the screen changed, but it's still not there" if changed
+                              else "nothing new appeared"})
+                current = after
+                if changed:
+                    break  # a new screen: ask the AI again, with what's on it now
+        return None
+
+    def _run_probe(self, probe: dict, screen: Screen, label: str) -> str | None:
+        """Carry out one exploration probe from the AI. Returns what was done, or None if it was refused
+        (an unknown element, something that looks destructive, a blocked key) or couldn't be done."""
+        from .perception import REGIONS
+
+        action = probe.get("action")
+        if action in ("click", "double_click", "right_click"):
+            ref = (probe.get("element") or "").strip()
+            el = next((e for e in screen.elements if e.id == ref), None) or \
+                next((e for e in screen.elements if e.text.lower() == ref.lower()), None)
+            if el is None or _DANGEROUS.search(el.text):
+                return None
+            verb = {"click": "Clicked", "double_click": "Double-clicked", "right_click": "Right-clicked"}[action]
+            self.status("thinking", f'{label}Exploring: {verb.lower()[:-2]}ing "{el.text[:40]}"…')
+            self._execute(Plan(True, f'{verb[:-2]} "{el.text[:50]}"', kind=action, target=el))
+            return f'{verb.lower()} "{el.text[:60]}"'
+        if action == "scroll":
+            direction = "up" if (probe.get("direction") or "").lower() == "up" else "down"
+            centre = foreground_center()
+            if centre is None:
+                return None
+            self.status("thinking", f"{label}Exploring: scrolling {direction}…")
+            self._executing = True
+            try:
+                executor.scroll_at(*centre, 5 if direction == "up" else -5)
+            finally:
+                self._executing = False
+            return f"scrolled {direction}"
+        if action == "press_key":
+            key = (probe.get("key") or "").strip().lower()
+            if not key or key in _BLOCKED_KEYS or not valid_hotkey(key):
+                return None
+            self.status("thinking", f"{label}Exploring: pressing {key}…")
+            self._execute(Plan(True, f"Press {key}", kind="press_key", key=key))
+            return f"pressed {key}"
+        if action == "zoom":
+            region = (probe.get("region") or "").strip().lower()
+            if region not in REGIONS:
+                return None
+            self.status("thinking", f"{label}Exploring: looking closely at the {region}…")
+            return f"looked closely at the {region} of the screen"
+        return None
+
+    def _run_llm(self, fn, *args):
+        """Call the AI planner without blocking Esc: None if cancelled or it failed (the user is told)."""
+        job = self._llm_pool.submit(fn, *args)
+        while not job.done():
+            if self._cancel.is_set():
+                return None  # it finishes in the background and is ignored
+            time.sleep(0.05)
+        try:
+            return job.result()
+        except Exception as e:
+            log.exception("AI planner call failed")
+            self.status("warn", f"AI planner failed ({str(e)[:60]})", 3000)
+            return None
 
     def _wait_for_change(self, screen: Screen, until: float, label: str) -> Screen | None:
         """Re-read the screen until its text changes (then return it, once settled), or None at `until`."""
@@ -620,56 +895,85 @@ class App:
         self.status("warn", text, 6000)
 
     def _question_prompt(self) -> str:
-        q = self._question
-        opts = "  ".join(f"{i}) {label}" for i, (label, _) in enumerate(q.options, 1))
-        return f"{q.prompt}  {opts}  ·  hold Right Ctrl to answer, Esc to cancel" if opts else \
-               f"{q.prompt}  ·  hold Right Ctrl and say it, Esc to cancel"
+        """The question box: the question, then each option numbered on its own line, then how to answer."""
+        q, options = self._question, self._question_options
+        n = len(options)
+        keys = "1" if n == 1 else f"1–{min(n, 9)}"
+        say = "the number or your answer" if q.kind == "text" else "the number"
+        lines = [q.prompt, *(f"{i}   {label}" for i, (label, _) in enumerate(options, 1)),
+                 f"Press {keys}, or hold Right Ctrl and say {say}  ·  Esc cancels"]
+        return "\n".join(lines)
 
     def _ask_user(self, q: Question, label: str, entry: dict):
-        """Ask a clarifying question and wait for a spoken answer.
+        """Ask a question with numbered options (always ending in Cancel) and wait for the answer: a number key,
+        or hold Right Ctrl and say the number (or, for "text" questions, anything else as a free answer).
 
-        Returns q.complete(answer): a Plan for Jev's questions, the answer text for the AI planner's.
+        Returns q.complete(payload or text): a Plan for Jev's questions, the answer text for the AI planner's.
         None if cancelled, unanswered or unclear (the user has been told).
         """
         while not self._answers.empty():
             self._answers.get_nowait()
-        self._question = q
-        record = {"question": q.prompt, "options": [o for o, _ in q.options]}
+        options = [*q.options, ("Cancel", _CANCEL)]
+        self._question, self._question_options = q, options
+        self._answer_keys = {str(i) for i in range(1, min(len(options), 9) + 1)}
+        record = {"question": q.prompt, "options": [o for o, _ in options]}
         entry.setdefault("questions", []).append(record)
         winsound.MessageBeep(winsound.MB_ICONASTERISK)
         self.ui(self.highlight.mark, q.rects, None)
-        self.status("question", label + self._question_prompt())
+        self.status("question", self._question_prompt() if not label else label + self._question_prompt())
+        # Number keys answer the question: swallow just those keys (not End/arrows, which share numpad scan
+        # codes) so they don't also type into the app underneath.
+        key_filter = keyboard.hook(self._answer_key_filter, suppress=True)
         try:
             deadline = time.monotonic() + ANSWER_TIMEOUT_S
-            audio = None
-            while audio is None:
+            item = None
+            while item is None:
                 if self._cancel.is_set() or (time.monotonic() > deadline and not self.recording):
                     record["answer"] = None
                     self.status("warn", "Cancelled" if self._cancel.is_set() else "No answer, so I stopped", 3000)
                     return None
                 try:
-                    audio = self._answers.get(timeout=0.1)
+                    item = self._answers.get(timeout=0.1)
                 except queue.Empty:
                     pass
         finally:
+            keyboard.unhook(key_filter)
             self._question = None
             self.ui(self.highlight.hide)
 
-        hints = [o for o, _ in q.options] if q.options else []
-        answer = self.transcriber.transcribe(audio, [clean_span(h) for h in hints])
-        record["answer"] = answer
-        if not answer:
-            self._fail("Didn't catch the answer, so I stopped")
+        how, value = item
+        if how == "key":
+            idx = value
+            record["answer"] = f"key {idx + 1}"
+        else:
+            answer = self.transcriber.transcribe(value, [clean_span(o) for o, _ in options])
+            record["answer"] = answer
+            if not answer:
+                self._fail("Didn't catch the answer, so I stopped")
+                return None
+            idx = spoken_choice(answer, len(options))
+            if idx is None and q.kind == "text":
+                text = clean_span(answer)
+                return q.complete(text) if text else None
+            if idx is None:
+                idx = self.decider.pick(q.prompt, answer, [o for o, _ in options])  # e.g. said an option's name
+            if idx is None:
+                self._fail(f"“{answer}” didn't match an option, so I stopped")
+                return None
+        record["picked"] = idx + 1
+        payload = options[idx][1]
+        if payload is _CANCEL:
+            self.status("warn", "Cancelled", 2500)
             return None
-        if q.kind == "text":
-            text = clean_span(answer)
-            return q.complete(text) if text else None
-        idx = self.decider.pick(q.prompt, answer, [o for o, _ in q.options])
-        record["picked"] = idx
-        if idx is None:
-            self._fail(f"“{answer}” didn't match an option, so I stopped")
-            return None
-        return q.complete(q.options[idx][1])
+        return q.complete(payload)
+
+    def _answer_key_filter(self, e: keyboard.KeyboardEvent) -> bool:
+        """Suppressing keyboard hook while a question is showing: a number key picks that option."""
+        if e.name in self._answer_keys:
+            if e.event_type == keyboard.KEY_DOWN:
+                self._answers.put(("key", int(e.name) - 1))
+            return False  # swallow it (down and up)
+        return True
 
     def _execute(self, p: Plan) -> None:
         self._last_action_t = time.monotonic()
