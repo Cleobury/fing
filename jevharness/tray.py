@@ -37,6 +37,8 @@ class Tray:
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Settings…", lambda: app.ui(app.open_settings), default=True),
                 pystray.MenuItem("Dry run (show, don't act)", lambda: app.ui(app.toggle_dry_run), checked=lambda _: app.settings.dry_run),
+                pystray.MenuItem("YOLO mode (decide everything itself)", lambda: app.ui(app.toggle_yolo),
+                                 checked=lambda _: app.settings.yolo),
                 pystray.MenuItem("Move indicator", lambda: app.ui(app.move_overlay)),
                 pystray.MenuItem("Reset indicator position", lambda: app.ui(app.reset_overlay_position)),
                 pystray.MenuItem("Open logs folder", lambda: os.startfile(LOG_DIR)),

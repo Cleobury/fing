@@ -39,6 +39,8 @@ Actions:
   (else null); submit = true to press Enter afterwards (searches, URLs, sending a chat message).
 - press_key: key = one key or shortcut, e.g. "enter", "escape", "ctrl+l", "alt+left".
 - scroll: direction = "up" or "down".
+- drag: press on `target` (its visible text) and drop it on `destination` (another element's visible text), or
+  `direction` "left"/"right"/"up"/"down" for a short move (a slider, a window).
 - search_pc: search the computer (files, folders, settings, programs not in the app list) with the system search
   box. text = what to search for. It types the query and shows results; add a click step for the right result.
 
@@ -54,6 +56,8 @@ Rules:
 - Whenever you ask a `question`, also give 2-4 short likely answers in `options` (they're shown numbered, so the
   user can reply with a number). Otherwise `options` is empty.
 - If the request already looks done, return no steps and no question.
+- `history` is everything done so far for this request, with what changed on screen and whether it worked. Build
+  on what worked; don't repeat actions that failed or changed nothing; try a different route instead.
 - `understanding`: one short sentence restating the goal."""
 
 SCHEMA = {
@@ -68,14 +72,15 @@ SCHEMA = {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["open_app", "click", "double_click", "right_click", "type",
-                                                          "press_key", "scroll", "search_pc"]},
+                                                          "press_key", "scroll", "search_pc", "drag"]},
                     "target": {"type": ["string", "null"]},
                     "text": {"type": ["string", "null"]},
                     "key": {"type": ["string", "null"]},
                     "direction": {"type": ["string", "null"]},
+                    "destination": {"type": ["string", "null"]},
                     "submit": {"type": "boolean"},
                 },
-                "required": ["action", "target", "text", "key", "direction", "submit"],
+                "required": ["action", "target", "text", "key", "direction", "destination", "submit"],
                 "additionalProperties": False,
             },
         },
@@ -101,7 +106,8 @@ Probes:
 
 Rules:
 - Think about where this app usually keeps what the step needs, and aim there.
-- Don't repeat anything in `tried`; learn from their results.
+- Don't repeat anything in `tried`; learn from their results. `history` is the whole run so far (actions, whether
+  they worked, earlier plans): use it too.
 - Never click anything that deletes, removes, uninstalls, buys, pays, sends, posts, signs out, or changes security
   or privacy settings.
 - `thinking`: one short sentence on where you expect to find it."""
@@ -144,6 +150,38 @@ def describe_elements(screen: Screen, limit: int = 250) -> list[dict]:
     return out
 
 
+LOCATE_SYSTEM = """You look at a screenshot for a voice-controlled computer assistant. It reads the screen with OCR, so it
+can't see icons, images, colours, or buttons without text. Find the things on screen that `step` could be referring
+to (or that would help carry it out) which are NOT already in ocr_text: icons, image thumbnails, coloured or
+shape-only buttons, toggles, avatars, logos. List at most 5, most likely first. Skip anything whose text is already
+in ocr_text.
+
+For each: `label` = a short description of what it is and looks like, e.g. "settings gear icon", "red record
+button", "thumbnail of a cat". `box` = [x0, y0, x1, y1], its bounding box in pixels of the image you were given
+(`image_size` is its width and height). Keep boxes tight around the item.
+If nothing fits, return an empty list."""
+
+LOCATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    "box": {"type": "array", "items": {"type": "integer"}},
+                },
+                "required": ["label", "box"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["items"],
+    "additionalProperties": False,
+}
+
+
 @dataclass
 class LlmPlan:
     understanding: str
@@ -167,12 +205,18 @@ def to_command(s: dict) -> str | None:
             return f"press {s['key']}"
         case "scroll":
             return f"scroll {s.get('direction') or 'down'}"
+        case "drag" if target and (s.get("destination") or s.get("direction")):
+            where = f'onto "{s["destination"]}"' if s.get("destination") else f"{s['direction']}"
+            return f'drag "{target}" {where}'
         case "search_pc" if text or target:
             return f'search the PC for "{text or target}"'
     return None
 
 
-def _screenshot_data_url(screen: Screen, max_width: int = 1600) -> str | None:
+SCREENSHOT_WIDTH = 1600  # screenshots are scaled down to this width before sending
+
+
+def _screenshot_data_url(screen: Screen, max_width: int = SCREENSHOT_WIDTH) -> str | None:
     if screen.shot is None:
         return None
     from PIL import Image
@@ -181,8 +225,14 @@ def _screenshot_data_url(screen: Screen, max_width: int = 1600) -> str | None:
     if img.width > max_width:
         img = img.resize((max_width, round(img.height * max_width / img.width)), Image.LANCZOS)
     buf = io.BytesIO()
-    img.save(buf, "JPEG", quality=80)
+    img.save(buf, "JPEG", quality=85)
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def _sent_size(screen: Screen) -> tuple[int, int]:
+    """Size of the screenshot as the model sees it (after _screenshot_data_url's scaling)."""
+    w, h = screen.shot.size
+    return (w, h) if w <= SCREENSHOT_WIDTH else (SCREENSHOT_WIDTH, round(h * SCREENSHOT_WIDTH / w))
 
 
 def _parse_json(content: str) -> dict:
@@ -206,6 +256,8 @@ class Planner:
         # Ollama only: keep the model loaded indefinitely. Its OpenAI-compatible API can't do this (and resets the
         # unload timer to the default on every call), so these requests go through Ollama's own /api/chat instead.
         self.keep_alive = keep_alive and provider == "ollama"
+        self.autonomous = False  # YOLO mode: the user can't be asked anything
+        self.allow_irreversible = False  # YOLO mode with irreversible actions allowed
         self._ollama_root = self.base_url.removesuffix("/v1")
         headers = {"Content-Type": "application/json"}
         if api_key:
@@ -219,10 +271,11 @@ class Planner:
         return self.model.split("/")[-1]
 
     def plan(self, request: str, steps_done: list[str], screen: Screen, problem: str | None,
-             answers: list[tuple[str, str]] = ()) -> LlmPlan:
+             answers: list[tuple[str, str]] = (), history: list[str] = ()) -> LlmPlan:
         context = {
             "request": request,
             "steps_done": steps_done,
+            "history": list(history),
             "problem": problem,
             "active_window": screen.window_title,
             "screen_elements": describe_elements(screen),
@@ -233,7 +286,7 @@ class Planner:
             content.append({"type": "image_url", "image_url": {"url": url}})
         body = {
             "model": self.model,
-            "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": content}],
+            "messages": [{"role": "system", "content": SYSTEM + self._autonomy_rules()}, {"role": "user", "content": content}],
             "temperature": 0.2,
             "response_format": {"type": "json_schema", "json_schema": {"name": "plan", "strict": True, "schema": SCHEMA}},
         }
@@ -299,12 +352,30 @@ class Planner:
             "model": self.model, "max_tokens": 5, "messages": [{"role": "user", "content": "Reply with the word ok."}],
         }).raise_for_status()
 
-    def explore(self, step: str, request: str, done: list[str], screen: Screen, tried: list[dict]) -> tuple[str, list[dict]]:
+    def _autonomy_rules(self) -> str:
+        if not self.autonomous:
+            return ""
+        rules = ("\n\nAUTONOMOUS MODE (overrides the rules above about asking): the user isn't available to answer. Never "
+                 "ask a `question`; when unsure, choose the most likely meaning and give steps.")
+        if self.allow_irreversible:
+            return rules + " The user has allowed irreversible actions (deleting, buying, sending, signing out) without confirmation."
+        return rules + (" Never plan steps that delete data, spend money, send or post messages, sign out or change security "
+                        "settings; if the request needs that, return no steps.")
+
+    def _explore_permission(self) -> str:
+        if self.allow_irreversible:
+            return ("\n\nThe user has allowed irreversible actions in this mode: you may click such controls when the step "
+                    "clearly needs them.")
+        return ""
+
+    def explore(self, step: str, request: str, done: list[str], screen: Screen, tried: list[dict],
+                history: list[str] = ()) -> tuple[str, list[dict]]:
         """Suggest ways to explore the current screen for where `step` can be done. Returns (thinking, probes)."""
         context = {
             "step": step,
             "full_request": request,
             "steps_done": done,
+            "history": list(history),
             "active_window": screen.window_title,
             "screen_size": [screen.monitor["width"], screen.monitor["height"]],
             "screen_elements": describe_elements(screen),
@@ -315,7 +386,7 @@ class Planner:
             content.append({"type": "image_url", "image_url": {"url": url}})
         body = {
             "model": self.model,
-            "messages": [{"role": "system", "content": EXPLORE_SYSTEM}, {"role": "user", "content": content}],
+            "messages": [{"role": "system", "content": EXPLORE_SYSTEM + self._explore_permission()}, {"role": "user", "content": content}],
             "temperature": 0.3,
             "response_format": {"type": "json_schema", "json_schema": {"name": "explore", "strict": True, "schema": EXPLORE_SCHEMA}},
         }
@@ -324,6 +395,71 @@ class Planner:
         data = self._chat(body, EXPLORE_SCHEMA)
         probes = [p for p in data.get("probes") or [] if isinstance(p, dict) and p.get("action")][:4]
         return data.get("thinking") or "", probes
+
+    def locate(self, step: str, screen: Screen) -> list[tuple[str, tuple[int, int, int, int]]]:
+        """Ask the vision model where the things `step` refers to are, when OCR can't see them (icons, images,
+        colours). Returns (label, (left, top, right, bottom)) in screen pixels; [] if it has no screenshot to look at."""
+        url = _screenshot_data_url(screen)
+        if url is None:
+            return []
+        sent_w, sent_h = _sent_size(screen)
+        context = {"step": step, "active_window": screen.window_title, "image_size": [sent_w, sent_h],
+                   "ocr_text": [e.text[:60] for e in screen.elements][:200]}
+        body = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": LOCATE_SYSTEM},
+                {"role": "user", "content": [{"type": "text", "text": json.dumps(context, ensure_ascii=False)},
+                                             {"type": "image_url", "image_url": {"url": url}}]},
+            ],
+            "temperature": 0.1,
+            "response_format": {"type": "json_schema", "json_schema": {"name": "locate", "strict": True, "schema": LOCATE_SCHEMA}},
+        }
+        if self.provider == "openrouter":
+            body["provider"] = {"require_parameters": True}
+        data = self._chat(body, LOCATE_SCHEMA)
+        mon = screen.monitor
+        sx, sy = mon["width"] / sent_w, mon["height"] / sent_h  # image pixels → screen pixels
+        found = []
+        for item in data.get("items") or []:
+            box, label = item.get("box"), (item.get("label") or "").strip()
+            if not label or not isinstance(box, list) or len(box) != 4:
+                continue
+            x0, x1 = sorted(max(0, min(sent_w, int(v))) for v in (box[0], box[2]))
+            y0, y1 = sorted(max(0, min(sent_h, int(v))) for v in (box[1], box[3]))
+            if x1 - x0 < 2 or y1 - y0 < 2 or (x1 - x0) * (y1 - y0) > sent_w * sent_h / 4:  # a dot, or a quarter of the screen
+                continue
+            found.append((label, (mon["left"] + round(x0 * sx), mon["top"] + round(y0 * sy),
+                                  mon["left"] + round(x1 * sx), mon["top"] + round(y1 * sy))))
+        return found[:5]
+
+    def pointing_check(self) -> tuple[int, int]:
+        """How well this model points: find 3 shapes on a test image. Returns (hits, tries)."""
+        from types import SimpleNamespace
+
+        from PIL import Image, ImageDraw
+
+        w, h = 1920, 1080
+        img = Image.new("RGB", (w, h), "#f3f3f3")
+        d = ImageDraw.Draw(img)
+        d.rectangle((0, 0, w, 60), fill="#2b2b2b")
+        targets = {"click the red circle": (450, 450, 550, 550), "press the blue play triangle": (1000, 425, 1130, 575),
+                   "click the green square": (1500, 750, 1700, 900)}
+        d.ellipse(targets["click the red circle"], fill="#e53935")
+        d.polygon([(1000, 425), (1000, 575), (1130, 500)], fill="#1e88e5")
+        d.rectangle(targets["click the green square"], fill="#43a047")
+        from .perception import Screen  # only for its shape; WinRT was loaded long ago by the time this runs
+
+        screen = Screen({"left": 0, "top": 0, "width": w, "height": h}, "Test", [], 0,
+                        SimpleNamespace(size=(w, h), rgb=img.tobytes()))
+        hits = 0
+        for step, (x0, y0, x1, y1) in targets.items():
+            found = self.locate(step, screen)
+            if found:
+                l, t, r, b = found[0][1]
+                cx, cy = (l + r) / 2, (t + b) / 2
+                hits += x0 - 20 <= cx <= x1 + 20 and y0 - 20 <= cy <= y1 + 20
+        return hits, len(targets)
 
     def _chat(self, body: dict, schema: dict = SCHEMA) -> dict:
         if self.keep_alive:
@@ -364,6 +500,16 @@ class Planner:
         })
         r.raise_for_status()
         return _parse_json(r.json()["message"]["content"])
+
+    def list_vision_models(self) -> list[str]:
+        """Models that accept images: for Ollama, those with the "vision" capability."""
+        if self.provider == "ollama":
+            return [m for m in self.list_models() if "vision" in self.ollama_capabilities(m)]
+        r = self.http.get(f"{self.base_url}/models")
+        r.raise_for_status()
+        return sorted(m["id"] for m in r.json()["data"]
+                      if "image" in ((m.get("architecture") or {}).get("input_modalities") or [])
+                      and "structured_outputs" in (m.get("supported_parameters") or []))
 
     def list_models(self) -> list[str]:
         if self.provider == "ollama":

@@ -10,13 +10,71 @@ let go, and it does it.
 
 ## How it works
 
-- **Whisper** (`large-v3-turbo`, on your NVIDIA GPU) turns your speech into text, locally.
-- **Windows OCR** reads the screen the moment you press the key, so it's ready when you let go.
-- **[Jev](https://docs.typesafe.ai)** (TypeSafe's System One model) makes each decision: which action, which
-  on-screen element, which app, whether the request is done yet. Code lists the candidates and Jev picks one,
-  with a probability, so it never has to invent coordinates or text. When it isn't confident, it asks you.
-- An optional **AI planner** (any model on OpenRouter, or a local model through Ollama) rewrites a request into
-  simple steps when Jev is confused, or when the request needs steps you didn't say.
+**Whisper** (`large-v3-turbo`, on your NVIDIA GPU) turns your speech into text, locally, while **Windows OCR**
+reads the screen (it starts the moment you press the key, so it's ready when you let go). Then each request climbs
+three stages, only going further when the stage before can't solve it:
+
+```
+ 1. OCR + Jev          fast, every command          →  can't find it / doesn't understand
+ 2. AI assist          optional, only when needed   →  still unsure, or needs your decision
+ 3. Ask you            numbered options, by key or voice
+```
+
+### Stage 1: can OCR and Jev solve it?
+
+Every command starts here, with no generative AI involved. **[Jev](https://docs.typesafe.ai)** (TypeSafe's
+System One model) makes each decision from what OCR read on screen: which action, which on-screen element, which
+app, what text to type. Code lists the candidates and Jev picks one, with a probability, so it never has to invent
+coordinates or text, and only acts when it's confident enough (thresholds in Settings → Jev).
+
+If what it needs isn't apparent, Jev and OCR look harder before giving up:
+
+- **waits** for a slow app or page to load (up to 5 s)
+- **tries the most likely tab or menu** (e.g. a Store tab), up to 3 clicks
+- **reads the screen again at 2× zoom** to catch small text
+- **scrolls** through the window, and back if that didn't help
+
+After the last step, Jev checks the screen to judge whether the whole request is **done**. If it isn't (e.g.
+"open YouTube in Brave" after only opening Brave), Jev chooses the next action itself and keeps going.
+
+### Stage 2: can the AI assist?
+
+Only if an **AI planner** is set up (any model on OpenRouter, or a local model through Ollama), and only when
+stage 1 is stuck: a step failed, Jev didn't understand what you said, or the request isn't done and Jev can't see
+what to do next.
+
+- **Rewriting the steps:** the AI gets your request, what went wrong, what's on screen (the text with positions,
+  plus a screenshot if **Send a screenshot** is on), and the **run journal**: every action so far with what it
+  changed on screen and whether Jev judged it worked, plus failed steps, dead ends, earlier plans and your
+  answers. So in a long run it builds on what worked and doesn't repeat what failed. It returns simple, literal steps
+  (`click "LIBRARY"` → `type "Witcher 3" into "Search"`), and each one goes back through Jev, which checks it
+  against the real screen.
+- **Looking at the screenshot:** a **vision model** points out icons, images and colours OCR can't read ("open
+  the settings gear", "click the red button"). What it finds becomes something Jev can pick.
+- **Guided exploring:** the AI suggests places to try (a sidebar, a "More" menu, going back, or a closer look at
+  one corner) and the screen is re-read after each.
+
+Exploring is capped at 8 actions and a minute per step. It never clicks things like Delete, Buy, Send or Sign
+out, and Esc stops it. (Settings → AI planner can also set the AI to rewrite *every* command up front.)
+
+### Stage 3: can you tell it more?
+
+When neither stage can settle something, it asks you. Every question lists **numbered options**, ending with
+**Cancel**. Press the number, or hold Right Ctrl and say it ("two", "the second one"); where it makes sense you
+can also just say your answer. It asks when:
+
+- **Jev is torn between specific things on screen** ("Click which one? 1) … 2) …"). This is asked straight
+  away, since you can answer faster than the AI could guess.
+- **it can't tell what text to type or search for** (it offers its best guesses from your words)
+- **the AI needs to know what you want**, or you're asking for something that deletes data, spends money,
+  sends a message or changes security settings
+- **it's stuck** after trying for 3 rounds ("I'm stuck on …. What should I do next?"), or didn't understand you
+- it has done **20 actions** beyond what you said ("Keep going?")
+
+If none of the options fit, choose **None of these: have the AI rethink**, or just say what you meant. That goes
+back to stage 2 with your answer, and the AI works out new steps.
+
+**YOLO mode** replaces this stage: it decides everything itself (see [YOLO mode](#yolo-mode)).
 
 ## Requirements
 
@@ -62,6 +120,7 @@ It runs without a console window. To see its log output while debugging, run it 
 | **Esc** (or Right Ctrl) while it's working | Stops |
 | Click **✓** on the indicator while it's working | Tells it the task is done, so it stops (shown as **Done ✓**) |
 | Tray icon → **Dry run** | Highlights what it would do, without doing it |
+| Tray icon → **YOLO mode** | Decides everything itself instead of asking (see below) |
 
 Things you can say:
 
@@ -69,20 +128,32 @@ Things you can say:
   to it, unless you ask for a new window.
 - **Click, type, press keys, scroll:** "click Library", "type hello into the search box", "press Ctrl+S",
   "scroll down"
+- **Drag:** "drag the budget file into the Archive folder", "move Fix the login bug to Done", "drag the volume
+  slider to the right"
 - **Several steps at once:** "open Notepad, then type hello and press Enter"
 - **Implied steps:** "open YouTube in Brave", "find the Witcher 3 in my Steam library". It keeps going until
   Jev judges the request done.
 - **Search the PC:** "find my budget spreadsheet", "open display settings". This uses the Start menu, or
   PowerToys if enabled; Jev then picks the matching result.
 
-Along the way it waits for slow apps and pages to load, and asks you when it's unsure or stuck. When what it
-needs isn't apparent, it **explores**: it tries the most likely tab or menu (e.g. a Store tab), reads the screen
-again at 2× zoom to catch small text, and scrolls through the window. With an AI planner it goes further: the AI
-looks at where everything is on screen and suggests places to try (a sidebar, a "More" menu, going back, or a
-closer look at one corner), and it re-reads the screen after each. Exploring is capped at 8 actions and a minute
-per step; it never clicks things like Delete, Buy, Send or Sign out, and Esc stops it.
+- **Window commands:** "minimise this window", "maximise it", "snap it to the left"
 
-Window commands work too: "minimise this window", "maximise it", "snap it to the left".
+### YOLO mode
+
+Turn it on from the tray menu or Settings → Jev, and stage 3 never waits for you:
+
+- **Questions:** it takes the most likely option, after Jev checks that it actually fits the request. If it
+  doesn't, the AI rethinks instead (stage 2).
+- **The AI** is told to decide rather than ask.
+- **When stuck,** it tries a different approach, and stops after two attempts.
+- **Instead of "Keep going?"** it stops after 30 actions beyond what you said.
+
+The idle dot turns purple while it's on; Esc and ✓ still stop it.
+
+By default it **still refuses irreversible actions**: before each action Jev judges whether it would be hard to
+undo (deleting, buying, sending a message, signing out, changing security settings), and if so it stops rather
+than doing it. This errs on the cautious side, e.g. it won't even draft a message to someone. Untick
+"…but still refuse irreversible actions" to allow them; then nothing asks you before deleting, buying or sending.
 
 ### The indicator
 
@@ -102,8 +173,8 @@ Right-click the tray icon → **Settings**.
 
 | Tab | What's there |
 |---|---|
-| **Jev** | TypeSafe API key and model, the confidence thresholds for acting, dry run |
-| **AI planner** | Provider (off, OpenRouter, Ollama), model (**Load list** shows what's available), key or server URL, when to use it (only when Jev is confused, or for every command), whether to send a screenshot (needs a vision model), and for Ollama whether to keep the model loaded in memory. Choosing a different Ollama model and pressing **Test** or **Save** unloads the previous one and loads the new one. |
+| **Jev** | TypeSafe API key and model, the confidence thresholds for acting, dry run, YOLO mode (and whether it still refuses irreversible actions) |
+| **AI planner** | Provider (off, OpenRouter, Ollama), model (**Load list** shows what's available), key or server URL, when to use it (only when Jev is confused, or for every command), whether to send a screenshot (needs a vision model), and for Ollama whether to keep the model loaded in memory. Choosing a different Ollama model and pressing **Test** or **Save** unloads the previous one and loads the new one. The **vision model** (the planner's by default) finds icons and images on the screenshot; it has to point accurately, which **Test connections** checks (e.g. `qwen3.8` can; `gemma4` describes screens well but can't). |
 | **PC search** | Search with PowerToys instead of the Start menu, and its shortcut (default `left alt+space`; **Record** captures a new one, **Detect** reads it from PowerToys) |
 | **Indicator** | Background and text colour, opacity, the dot colour for each state, and its position (presets, **Drag…** to place it anywhere, or **Reset position**). Changes preview live. |
 
@@ -121,8 +192,9 @@ Right-click the tray icon → **Settings**.
 
 - **It controls your real mouse and keyboard.** Use **Dry run** to try things out, and **Esc** to stop at any
   time. The AI planner is told to ask before anything that deletes data, spends money, sends a message or
-  changes security settings, but check what it's doing.
-- It only sees **text**: icon-only buttons can't be clicked by name ("open <app>" still works for apps).
+  changes security settings, but AI models don't always follow such instructions, so check what it's doing.
+- Without a vision model it only sees **text**: icon-only buttons can't be clicked by name ("open <app>" still
+  works for apps). Vision models vary a lot at pointing accurately; **Test connections** checks yours.
 - It can't see or control windows running **as administrator**, unless it's also run as administrator.
 - The microphone stays open while the app runs so recording starts instantly, so Windows shows its
   microphone-in-use indicator.
@@ -150,17 +222,18 @@ if you used `-Startup`) and `%APPDATA%\JevHarness`. The API keys are under **Jev
 
 | Module | Role |
 |---|---|
-| `app.py` | Push-to-talk, the step loop (resolve, act, check done, re-plan), clarifying questions |
-| `decide.py` | Jev questions: splitting a request into steps, the action for a step, done / loading / ambiguity checks |
-| `llm.py` | AI planner over an OpenAI-compatible chat API (OpenRouter, Ollama), plus Ollama keep-alive |
+| `app.py` | Push-to-talk and the three stages: the step loop (resolve, explore, act, check done), handing over to the AI, questions, YOLO mode |
+| `decide.py` | Jev questions: splitting a request into steps, the action for a step (including drags), done / loading / ambiguity / option-fit / irreversible checks |
+| `llm.py` | The AI over an OpenAI-compatible chat API (OpenRouter, Ollama): planning steps, exploring, locating things on the screenshot; Ollama keep-alive |
 | `perception.py` | Screenshot + Windows OCR → text elements with screen positions |
 | `desktop.py` | Win32: foreground and open app windows, switching to a window, fullscreen detection, waiting for the screen to settle |
-| `executor.py` | Mouse, keyboard, launching and switching apps, PC search |
+| `executor.py` | Mouse (clicks, drags, scrolling), keyboard, launching and switching apps, PC search |
 | `stt.py`, `audio.py` | Whisper on CUDA; microphone capture with a short pre-roll |
 | `apps.py` | Installed Start-menu apps, for "open <app>" |
 | `search.py` | Searching the PC: PowerToys via its shortcut, or the Start menu |
 | `overlay.py` | The status indicator (with its ✓ button) and the highlight around the element being acted on |
 | `tray.py`, `settings_dialog.py` | The tray icon and Settings window |
+| `journal.py` | The run journal: each action, what it changed and whether it worked, for the AI's context |
 | `settings.py` | Settings file and API keys |
 
 Whisper must load before anything in the process initialises COM (Windows OCR, PortAudio, the tray icon), or

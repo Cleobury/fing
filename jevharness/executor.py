@@ -29,6 +29,28 @@ def _scroll(notches: int) -> None:
     _user32.mouse_event(_WHEEL, 0, 0, ctypes.c_uint32((notches * _NOTCH) & 0xFFFFFFFF), 0)
 
 
+def _move(x: int, y: int) -> None:
+    """Move the pointer with real mouse-move input (not just SetCursorPos), so apps register a drag."""
+    left, top = _user32.GetSystemMetrics(76), _user32.GetSystemMetrics(77)  # virtual screen origin
+    width, height = _user32.GetSystemMetrics(78), _user32.GetSystemMetrics(79)
+    nx = round((x - left) * 65535 / max(1, width - 1))
+    ny = round((y - top) * 65535 / max(1, height - 1))
+    _user32.mouse_event(0x0001 | 0x8000 | 0x4000, nx, ny, 0, 0)  # MOVE | ABSOLUTE | VIRTUALDESK
+
+
+def drag(x0: int, y0: int, x1: int, y1: int, steps: int = 20) -> None:
+    """Press at (x0, y0), glide to (x1, y1) and release there."""
+    _move(x0, y0)
+    time.sleep(0.05)
+    _user32.mouse_event(_BUTTONS["left"][0], 0, 0, 0, 0)
+    time.sleep(0.12)  # let the app notice the press before moving (drag threshold)
+    for i in range(1, steps + 1):
+        _move(round(x0 + (x1 - x0) * i / steps), round(y0 + (y1 - y0) * i / steps))
+        time.sleep(0.015)
+    time.sleep(0.12)  # hover over the drop target so it can highlight / accept
+    _user32.mouse_event(_BUTTONS["left"][1], 0, 0, 0, 0)
+
+
 def scroll_at(x: int, y: int, notches: int) -> None:
     """Scroll the window under (x, y): positive is up. Wheel input goes to whatever is under the pointer."""
     _user32.SetCursorPos(int(x), int(y))
@@ -58,6 +80,10 @@ def execute(p: Plan, search_hotkey: str | None = None) -> None:
         launch(p.app)
     elif p.kind == "switch_app":
         focus_window(p.window)
+    elif p.kind == "drag":
+        x0, y0 = p.target.center
+        x1, y1 = p.drop.center if p.drop is not None else (x0 + p.drop_offset[0], y0 + p.drop_offset[1])
+        drag(x0, y0, x1, y1)
     elif p.kind == "search_pc":
         search.open_and_type(p.text, search_hotkey)
     else:

@@ -36,8 +36,13 @@ ACTIONS = {
         "Search the computer with the system search box to find or open a file, folder, setting or program that is "
         "not visible on screen and is not an installed application listed for opening"
     ),
+    "drag": ("Drag with the mouse: press on one on-screen element and drop it somewhere else (move a file into a "
+             "folder, reorder items, move a slider, a window or a card)"),
     "none": "Not a computer command, unclear, or misheard",
 }
+
+# Where a drag can go besides onto another element: a short move in a direction (sliders, windows, reordering).
+DRAG_DIRECTIONS = {"left": (-300, 0), "right": (300, 0), "up": (0, -300), "down": (0, 300)}
 
 # Option ids are `keyboard` library combos. Deliberately excludes destructive shortcuts like alt+f4.
 KEYS = {
@@ -111,6 +116,8 @@ class Plan:
     scroll: str | None = None
     app: App | None = None
     new_instance: bool = False  # open_app: launch another copy even if the app is already open
+    drop: Element | None = None  # drag: the element to drop onto
+    drop_offset: tuple[int, int] = (0, 0)  # drag: or a move by this many pixels from the start
     window: int | None = None  # switch_app: the existing window to bring forward
     question: Question | None = None
     log: dict = field(default_factory=dict)
@@ -238,18 +245,51 @@ class Decider:
         ans = r.answers["steps"]
         return options[int(ans.choice[1:])], {criteria[k]: v for k, v in _top(ans, 3).items()}
 
-    def is_done(self, request: str, done: list[str], screen: Screen) -> float:
-        """Probability that `request` has been fully carried out, judging by the steps taken and the screen now."""
+    def option_fits(self, request: str, question: str, option: str) -> float:
+        """Probability that `option` is a sensible answer to `question` for carrying out `request`
+        (YOLO mode checks this before taking the top option without asking)."""
         r = self.client.system_one(
-            {"request": request, "steps_done": done, "active_window": screen.window_title,
-             "screen_elements": [e.text[:120] for e in screen.elements][:MAX_TARGETS]},
-            {"done": Noul(instructions=(
-                "The user asked for `request` and these actions were carried out: `steps_done`. Judging by those and by what "
-                "is on screen now, has `request` been fully done, with nothing left to do? No if part of it (e.g. finding, "
-                "typing or opening something it mentions) hasn't happened yet."
+            {"request": request, "question": question, "option": option},
+            {"fits": Noul(instructions=(
+                "To carry out `request`, the assistant has to answer `question`. Does `option` fit what the user wants, "
+                "i.e. is it a sensible answer rather than something unrelated?"
             ))},
         )
-        return r.answers["done"].noul
+        return r.answers["fits"].noul
+
+    def is_irreversible(self, request: str, action: str, screen: Screen) -> float:
+        """Probability that doing `action` now would be hard to undo (YOLO mode's safety check)."""
+        r = self.client.system_one(
+            {"request": request, "action": action, "active_window": screen.window_title,
+             "screen_elements": [e.text[:80] for e in screen.elements][:120]},
+            {"irreversible": Noul(instructions=(
+                "The assistant is about to do `action` in `active_window` to carry out `request`. Would that be hard to "
+                "undo: deleting or overwriting data, spending money, sending or posting a message that other people will "
+                "see, signing out, uninstalling, or changing security or privacy settings? Opening, navigating, "
+                "searching, typing into a box without submitting, scrolling and selecting are all easy to undo."
+            ))},
+        )
+        return r.answers["irreversible"].noul
+
+    def is_done(self, request: str, done: list[str], screen: Screen,
+                last_action: dict | None = None) -> tuple[float, float | None]:
+        """Probability that `request` has been fully carried out, judging by the steps taken and the screen now;
+        and, if `last_action` ({"action", "step"}) is given, that it worked (asked in the same request)."""
+        state = {"request": request, "steps_done": done, "active_window": screen.window_title,
+                 "screen_elements": [e.text[:120] for e in screen.elements][:MAX_TARGETS]}
+        questions = {"done": Noul(instructions=(
+            "The user asked for `request` and these actions were carried out: `steps_done`. Judging by those and by what "
+            "is on screen now, has `request` been fully done, with nothing left to do? No if part of it (e.g. finding, "
+            "typing or opening something it mentions) hasn't happened yet."
+        ))}
+        if last_action:
+            state.update(last_action=last_action["action"], last_step=last_action["step"])
+            questions["last_worked"] = Noul(instructions=(
+                "Judging by the screen now (`screen_elements`, `active_window`), did `last_action` have its intended "
+                "effect? It was done to carry out `last_step`. No if the screen shows it didn't happen or went wrong."
+            ))
+        r = self.client.system_one(state, questions)
+        return r.answers["done"].noul, (r.answers["last_worked"].noul if last_action else None)
 
     def pick(self, question: str, answer: str, labels: list[str]) -> int | None:
         """Which of `labels` the user chose in their spoken `answer` to `question`, or None."""
@@ -307,6 +347,16 @@ class Decider:
                 criteria=KEYS,
             ),
             "scroll": Choice(instructions="If `command` asks to scroll, in which direction?", criteria=SCROLL),
+            "drop": Choice(
+                instructions=(
+                    "If `command` asks to drag something, where should it be dropped: onto one of the elements in "
+                    "`screen_elements`, or a short way in a direction (for a slider, a window or reordering)? Choose none "
+                    "if it isn't a drag."
+                ),
+                criteria={**{k: v for k, v in target_options.items() if k != "none"},
+                          **{f"dir_{d}": f"A short way {d} from where it starts" for d in DRAG_DIRECTIONS},
+                          "none": "Not a drag, or nowhere listed fits"},
+            ),
             "submit": Noul(
                 instructions="Does `command` ask for text to be typed and then submitted, sent or searched, so Enter should be pressed after typing?"
             ),
@@ -318,6 +368,10 @@ class Decider:
                     "screen (opening an app, a key press, a scroll). No if the needed control is not on this screen."
                 ),
             ),
+            **({"last_worked": Noul(instructions=(
+                    "Judging by the screen now (`screen_elements`, `active_window`), did `last_action` have its intended "
+                    "effect? It was done to carry out `last_step`. No if the screen shows it didn't happen or went wrong."
+                ))} if "last_action" in state else {}),
             "loading": Noul(
                 instructions=(
                     "Does `active_window` look like it is still loading or not ready yet: a splash screen, 'Loading…' or "
@@ -426,6 +480,7 @@ def plan(answers: dict, targets: list[Element], texts: list[str], apps: list[App
         "doable": answers["doable"].noul,
         "ambiguous": answers["ambiguous"].noul,
         "loading": answers["loading"].noul,
+        "drop": {(next((e.text for e in targets if e.id == k), k)): v for k, v in _top(answers["drop"], 3).items()},
         "navigate": {(next((e.text for e in targets if e.id == k), k)): v for k, v in _top(answers["navigate"], 3).items()},
     }
     if "text" in answers:
@@ -445,6 +500,26 @@ def plan(answers: dict, targets: list[Element], texts: list[str], apps: list[App
 
     if kind == "none" or p_action < min_action:
         return fail(NOT_UNDERSTOOD)
+
+    if kind == "drag":
+        drop_ans = answers["drop"]
+        p_drop = drop_ans.probabilities[drop_ans.choice]
+        if drop_ans.choice == "none" or p_drop < min_target:
+            return fail("Couldn't tell where to drag it to")
+        drop_el = next((e for e in targets if e.id == drop_ans.choice), None)
+        offset = DRAG_DIRECTIONS.get(drop_ans.choice.removeprefix("dir_"), (0, 0)) if drop_el is None else (0, 0)
+        where = f'onto "{drop_el.text[:30]}"' if drop_el else drop_ans.choice.removeprefix("dir_")
+
+        def make_drag(el: Element) -> Plan:
+            return Plan(True, f'Drag "{el.text[:40]}" {where}', kind=kind, target=el, drop=drop_el, drop_offset=offset, log=log)
+
+        if tied := _tied(target_ans, targets, min_target, ambiguous):
+            return ask("Drag which one?", [(_label(e), e) for e in tied], make_drag, [e.rect for e in tied])
+        if target is None or p_target < min_target:
+            return fail("Couldn't find what to drag on this screen")
+        if drop_el is not None and drop_el.id == target.id:
+            return fail("Can't drag something onto itself")
+        return make_drag(target)
 
     if kind in _CLICK_KINDS:
         verb = {"click": "Click", "double_click": "Double-click", "right_click": "Right-click"}[kind]

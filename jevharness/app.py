@@ -48,6 +48,7 @@ from .desktop import (
     foreground_window,
     wait_until_settled,
 )
+from .journal import Journal, describe_change
 from .llm import PROVIDERS, Planner
 from .search import valid_hotkey
 from .overlay import Highlight, Overlay
@@ -76,6 +77,9 @@ MAX_NAV_HOPS = 3  # clicks to find where a step can be done (e.g. Library → St
 ANSWER_TIMEOUT_S = 30  # how long a clarifying question waits for a spoken answer
 STUCK_ROUNDS = 3  # rounds in a row without progress before asking the user what to do next
 CHECK_IN_EVERY = 20  # actions beyond what was said between "keep going?" check-ins
+YOLO_MAX_EXTRA = 30  # YOLO mode has no check-ins: stop after this many actions beyond what was said
+YOLO_MAX_STUCK = 2  # YOLO mode: new approaches to try when stuck before giving up
+IRREVERSIBLE = 0.5  # YOLO safe mode stops before an action Jev rates at least this likely to be hard to undo
 DONE_THRESHOLD = 0.5  # after the last step, keep going (Jev, else the AI planner) while Jev's "request is done" is below this
 LOADING = 0.5  # Jev's "screen is still loading" probability that makes a failing step wait
 JUST_ACTED_S = 3  # a step failing this soon after an action also waits, in case the screen hasn't caught up
@@ -91,6 +95,18 @@ CONTINUE = object()  # pending-step marker: let Jev choose the next action towar
 PLANNER_ERROR = object()  # _replan result when the AI call itself failed
 TRY_AGAIN = object()  # "I'm stuck" answer: carry on with no new guidance
 _CANCEL = object()  # the Cancel option every question ends with
+_RETHINK = object()  # the "None of these" option: hand the question back to the AI planner
+
+
+def _quoted(label: str) -> str:
+    return label if label.startswith('"') else f'"{label}"'
+
+
+@dataclass
+class Rethink:
+    """_ask_user result when none of the options fit: the AI planner should work out new steps instead."""
+
+    reason: str
 
 _NUMBER_WORDS = {"one": 1, "first": 1, "two": 2, "second": 2, "three": 3, "third": 3, "four": 4, "fourth": 4,
                  "five": 5, "fifth": 5, "six": 6, "sixth": 6, "seven": 7, "seventh": 7, "eight": 8, "eighth": 8,
@@ -130,7 +146,21 @@ def make_planner(s: Settings) -> Planner | None:
     key = get_api_key(s.llm_provider) if info["needs_key"] else None
     if info["needs_key"] and not key:
         return None
-    return Planner(s.llm_provider, s.llm_model, key, s.llm_base_url or None, s.llm_screenshot, keep_alive=s.llm_keep_alive)
+    planner = Planner(s.llm_provider, s.llm_model, key, s.llm_base_url or None, s.llm_screenshot, keep_alive=s.llm_keep_alive)
+    planner.autonomous = s.yolo
+    planner.allow_irreversible = s.yolo and s.yolo_allow_irreversible
+    return planner
+
+
+def make_vision(s: Settings, planner: Planner | None) -> Planner | None:
+    """The model that finds icons and images on screenshots: the chosen vision model, or the planner's own.
+    None if the planner is off or screenshots aren't sent."""
+    if planner is None or not s.llm_screenshot:
+        return None
+    if not s.vision_model or s.vision_model == planner.model:
+        return planner
+    key = get_api_key(s.llm_provider) if PROVIDERS[s.llm_provider]["needs_key"] else None
+    return Planner(s.llm_provider, s.vision_model, key, s.llm_base_url or None, True, keep_alive=s.llm_keep_alive)
 
 
 class App:
@@ -160,6 +190,10 @@ class App:
         self._answers: queue.Queue = queue.Queue()
         self._last_action_t = 0.0
         self._marked_done = False  # the user clicked ✓: stop, and report success rather than "stopped"
+        self._command = ""  # the request being worked on
+        self._journal = Journal()  # what has happened while carrying it out (see journal.py)
+        self._ai_steps: set[str] = set()  # steps that came from the AI planner, for the journal
+        self._step_last_worked: float | None = None  # set by _resolve_step: Jev's verdict on the previous action
 
         self.overlay = Overlay(self.root)
         self.overlay.on_check = self._user_marked_done
@@ -177,6 +211,7 @@ class App:
         self.tray = Tray(self)
         self.decider: Decider | None = None
         self.planner: Planner | None = None
+        self.vision: Planner | None = None  # finds icons/images on screenshots (may be the planner itself)
         self._ollama_lock = threading.Lock()
         self._ollama_model: tuple[str, str] | None = None  # the local model the app is using: (server, name)
         self._rebuild_decider()
@@ -236,13 +271,14 @@ class App:
         return ""
 
     def _dry_run_note(self) -> str:
-        return " · dry run" if self.settings.dry_run else ""
+        return (" · dry run" if self.settings.dry_run else "") + (" · YOLO" if self.settings.yolo else "")
 
     def _refresh_idle(self) -> None:
         self.overlay.idle_text = self._idle_text()
         # Amber dot while it can't act for real (setup missing, or dry run).
         ready = self.model_ready and self.decider
-        self.overlay.idle_state = "idle" if ready and not self.settings.dry_run else "warn"
+        self.overlay.idle_state = ("warn" if not ready or self.settings.dry_run
+                                   else "yolo" if self.settings.yolo else "idle")
         if self.overlay.state in ("idle", "loading", "warn") and not self.recording and not self.busy:
             self.overlay.show(self.overlay.idle_state, self.overlay.idle_text)
         self._last_status = self.overlay.idle_text or "Ready · hold Right Ctrl to speak" + self._dry_run_note()
@@ -272,6 +308,7 @@ class App:
         key = get_api_key()
         self.decider = Decider(key, self.settings.model) if key else None
         self.planner = make_planner(self.settings)
+        self.vision = make_vision(self.settings, self.planner)
 
     def serve_model(self, planner: Planner | None, load: bool = True) -> str:
         """Make `planner`'s local Ollama model the one in memory: unload the model the app was using before
@@ -347,6 +384,14 @@ class App:
             self.settings_dialog.win.focus_force()
         else:
             self.settings_dialog = SettingsDialog(self)
+
+    def toggle_yolo(self) -> None:
+        self.settings.yolo = not self.settings.yolo
+        self.settings.save()
+        self._rebuild_decider()
+        self._refresh_idle()
+        self.overlay.show(self.overlay.idle_state, "YOLO mode on: I'll decide everything myself" if self.settings.yolo
+                          else "YOLO mode off: I'll ask when unsure", 2500)
 
     def toggle_dry_run(self) -> None:
         self.settings.dry_run = not self.settings.dry_run
@@ -480,6 +525,12 @@ class App:
         done: list[str] = []
         guidance: list[tuple[str, str]] = []  # the user's answers when asked how to get unstuck
         stuck = 0  # rounds in a row without progress: failed steps, repeated actions, or an unchanged screen
+        yolo_escalations = 0  # YOLO mode: times it was stuck and tried a new approach instead of asking
+        entry["yolo"] = self.settings.yolo
+        self._command = command
+        self._journal = journal = Journal()
+        entry["journal"] = journal.events
+        self._ai_steps = set(steps) if self.planner and self.settings.llm_mode == "always" else set()
         last_seen = None
         fresh = True  # `screen` is current for the next step
         # Keep going until Jev judges the request done, or the user presses Esc / Right Ctrl.
@@ -489,8 +540,14 @@ class App:
                     break
                 # Out of steps. Requests often imply more than was said ("open YouTube in Brave" is also "go to
                 # YouTube"), so check the result against the screen, and work out what's still needed if it isn't done.
-                screen, fresh = self.perception.capture([self.overlay.rect], follow="foreground"), True
-                p_done = self.decider.is_done(command, done, screen)
+                if not fresh:
+                    screen = self.perception.capture([self.overlay.rect], follow="foreground")
+                fresh = True
+                last = journal.unverified_action()
+                p_done, worked = self.decider.is_done(command, journal.done_for_jev(), screen, last)
+                if last is not None:
+                    last["worked"] = round(worked, 2)
+                journal.add("check", p=round(p_done, 2))
                 entry.setdefault("done_checks", []).append(round(p_done, 2))
                 if p_done >= DONE_THRESHOLD:
                     break
@@ -498,6 +555,9 @@ class App:
                 stuck = stuck + 1 if seen == last_seen else 0
                 last_seen = seen
                 extra = len(done) - len(steps)
+                if self.settings.yolo and extra >= YOLO_MAX_EXTRA:
+                    self._fail(f"YOLO mode: stopped after {extra} extra actions without finishing")
+                    break
                 if extra > 0 and extra % CHECK_IN_EVERY == 0 and not self._keep_going(command, entry):
                     break
                 problem = "The steps so far haven't finished the request. Give only what is still needed."
@@ -510,13 +570,17 @@ class App:
                 if not fresh:
                     screen = self.perception.capture([self.overlay.rect], follow="foreground")
                 fresh = False
-                context = {"full_request": command, "steps_done": done, "recent_actions": recent}
+                context = {"full_request": command, "steps_done": journal.done_for_jev(), "recent_actions": recent}
+                if last := journal.unverified_action():
+                    context.update(last_action=last["action"], last_step=last["step"])
                 if continuing:
                     # No planned step left but the request isn't done: Jev picks the next action itself.
                     step = command
                     context["task"] = ("Choose only the next single action still needed to finish `command`, given "
                                        "`steps_done` and the current screen. Do not repeat anything in `steps_done`.")
                 out = self._resolve_step(step, label, screen, context, entry)
+                if last is not None and self._step_last_worked is not None:
+                    last["worked"] = round(self._step_last_worked, 2)
                 if continuing and out.plan is not None and out.plan.description in done[-3:]:
                     out = StepOutcome(None, f'the next action would repeat "{out.plan.description}"', out.screen)
 
@@ -529,12 +593,26 @@ class App:
                         more = f", then {len(pending)} more step{'s' * (len(pending) > 1)}" if pending else ""
                         self.status("done", f"Would: {p.description}{more}", 4000)
                         break
+                    if self.settings.yolo and not self.settings.yolo_allow_irreversible:
+                        # Nobody is confirming, so check the action itself rather than trusting the AI's plan.
+                        risk = self.decider.is_irreversible(command, p.description, out.screen)
+                        entry.setdefault("irreversible_checks", []).append({"action": p.description, "p": round(risk, 2)})
+                        if risk > IRREVERSIBLE:
+                            self._fail(f"YOLO mode: “{p.description}” looks hard to undo, so I stopped "
+                                       "(allow it in Settings → Jev)")
+                            break
+                    source = ("Jev (next step toward the request)" if continuing else "the AI planner"
+                              if step in self._ai_steps else "the user's words")
+                    event = journal.action("(the next step toward the request)" if continuing else step, p.description, source)
                     before = foreground_window()
                     self._execute(p)
                     done.append(p.description)
                     self._recent.append((time.monotonic(), p.description))
                     self.status("done", f"{label}{p.description}", 3000)
                     self._let_screen_catch_up(p, before)
+                    after = self.perception.capture([self.overlay.rect], follow="foreground")
+                    event["change"] = describe_change(out.screen, after)
+                    screen, fresh = after, True
                     continue
 
                 if not out.problem or self._cancel.is_set():
@@ -546,12 +624,25 @@ class App:
                 stuck = STUCK_ROUNDS if not done and out.problem.startswith(NOT_UNDERSTOOD) else stuck + 1
                 screen, fresh = out.screen, True
                 problem = f'The step "{"finish the request" if continuing else step}" failed: {out.problem}'
+                journal.add("failed", step="finish the request" if continuing else step, reason=out.problem)
 
             # Not done yet: work out the further steps (the AI planner's list, else Jev's next action).
-            if stuck >= STUCK_ROUNDS:
+            if stuck >= STUCK_ROUNDS and self.settings.yolo:
+                # Nobody to ask: tell the AI to try something different, and give up after a couple of goes.
+                yolo_escalations += 1
+                entry.setdefault("stuck", []).append(problem)
+                if yolo_escalations > YOLO_MAX_STUCK or self.planner is None:
+                    self._fail(f"YOLO mode: stuck on “{command[:50]}”, so I stopped")
+                    break
+                stuck = 0
+                guidance.append(("I'm stuck. What should I do next?",
+                                 "The user isn't available (YOLO mode). Try a clearly different approach."))
+            elif stuck >= STUCK_ROUNDS:
                 answer = self._ask_how_to_continue(command, problem, entry)
                 if answer is None:
                     break
+                if isinstance(answer, Rethink):
+                    answer = f"None of the options: {answer.reason}."
                 stuck = 0
                 if answer is TRY_AGAIN:
                     answer = None  # just have another go, with no new guidance
@@ -582,6 +673,8 @@ class App:
         steps = self._replan(command, done, screen, problem, entry, guidance)
         if steps is PLANNER_ERROR or steps == []:
             return [CONTINUE]  # the AI failed, or thinks it's done when Jev doesn't: Jev tries the next action
+        if steps:
+            self._ai_steps.update(steps)
         return steps
 
     def _ask_how_to_continue(self, command: str, problem: str, entry: dict) -> str | None:
@@ -596,7 +689,7 @@ class App:
     def _keep_going(self, command: str, entry: dict) -> bool:
         short = command if len(command) <= 50 else command[:49] + "…"
         q = Question(f"Still working on “{short}”. Keep going?", "choose", [("Keep going", True)], lambda v: v, [])
-        return bool(self._ask_user(q, "", entry))
+        return self._ask_user(q, "", entry) is True
 
     def _replan(self, command: str, done: list[str], screen: Screen, problem: str | None, entry: dict,
                 guidance: list[tuple[str, str]] = ()):
@@ -609,7 +702,8 @@ class App:
         for _ in range(3):
             self.status("thinking", f"Thinking it through ({self.planner.name})…  Esc to cancel")
             t = time.perf_counter()
-            job = self._llm_pool.submit(self.planner.plan, command, done, screen, problem, answers)
+            job = self._llm_pool.submit(self.planner.plan, command, self._journal.done_for_jev(), screen, problem, answers,
+                                        self._journal.for_ai())
             while not job.done():
                 if self._cancel.is_set():
                     entry["replans"].append({"problem": problem, "cancelled": True})
@@ -624,10 +718,17 @@ class App:
                 return PLANNER_ERROR
             entry["replans"].append({"problem": problem, "ms": round((time.perf_counter() - t) * 1000),
                                      "understanding": lp.understanding, "steps": lp.steps, "question": lp.question})
+            if lp.steps:
+                self._journal.add("plan", steps=lp.steps, why=lp.understanding)
+            if lp.question and not lp.steps and self.settings.yolo and not lp.options:
+                answers.append((lp.question, "The user isn't available (YOLO mode): decide yourself."))
+                continue
             if lp.question and not lp.steps:
                 answer = self._ask_user(Question(lp.question, "text", [(o, o) for o in lp.options], lambda s: s, []), "", entry)
                 if answer is None:
                     return None
+                if isinstance(answer, Rethink):
+                    answer = f"None of those options: {answer.reason}."
                 answers.append((lp.question, answer))
                 continue
             if lp.steps:
@@ -644,12 +745,15 @@ class App:
         """
         tried: list[str] = []
         hop = 0
+        self._step_last_worked = None  # Jev: did the previous action work? (asked with this step's first request)
         wait_until: float | None = None  # None: haven't waited this step; 0: already waited
         while True:
             self.status("thinking", f"{label}“{step}”" + (f" (looking: {' → '.join(tried)})" if tried else ""))
             t = time.perf_counter()
             answers, targets, texts, apps = self.decider.ask(step, screen, self.installed_apps, {**context, "navigation_tried": tried})
             p = plan(answers, targets, texts, apps, self.settings.min_action_prob, self.settings.min_target_prob)
+            if hop == 0 and "last_worked" in answers:
+                self._step_last_worked = answers["last_worked"].noul
             nav = None if p.ok else navigation(answers, targets, self.settings.min_target_prob, set(tried))
             entry["results"].append({"step": step, "hop": hop, "jev_ms": round((time.perf_counter() - t) * 1000),
                                      "ocr_ms": round(screen.ocr_ms), "window": screen.window_title, "elements": len(screen.elements),
@@ -661,7 +765,7 @@ class App:
                     self.ui(self.highlight.mark, p.question.rects, 3000)
                     self.status("question", f"{label}Would ask: {p.question.prompt}", 5000)
                     return StepOutcome(None, None, screen)
-                return StepOutcome(self._ask_user(p.question, label, entry), None, screen)
+                return self._question_outcome(p.question, label, entry, screen)
 
             # Maybe the app or page just hasn't finished loading: give it a few seconds before looking elsewhere.
             if wait_until is None and (answers["loading"].noul > LOADING or len(screen.elements) <= 2
@@ -693,7 +797,9 @@ class App:
             self._execute(Plan(True, f'Click "{nav.text[:50]}"', kind="click", target=nav))
             self.status("thinking", f'{label}Not here: trying "{nav.text[:40]}"')
             wait_until_settled(6, self._cancel.is_set)
-            screen = self.perception.capture([self.overlay.rect], follow="foreground")
+            looked_from, screen = screen, self.perception.capture([self.overlay.rect], follow="foreground")
+            self._journal.add("look", what=f'clicked "{nav.text[:40]}" to look for what "{step[:40]}" needs',
+                              result=describe_change(looked_from, screen))
 
     # ---- exploring ----------------------------------------------------------------
 
@@ -702,6 +808,7 @@ class App:
         """The step's target isn't apparent: look harder, cheapest first.
 
         1. A closer look: OCR the screen at 2x, which finds small text the normal pass misses.
+           Then, with a vision model, look at the screenshot for icons, images and colours OCR can't read.
         2. Scroll the window down (up to 2 pages), re-reading each time; scroll back if that didn't help.
         3. With an AI planner: it sees the OCR elements with their positions (and the screenshot), and suggests
            probes (click a tab or menu, press a key, scroll, or zoom into a region for a closer look). After
@@ -711,7 +818,7 @@ class App:
         Returns the step's outcome once Jev can do it (or asks the user), or None if nothing turned it up.
         Bounded by EXPLORE_ACTIONS and EXPLORE_S; Esc stops it.
         """
-        from .perception import merge_elements  # WinRT: only importable once Whisper has loaded
+        from .perception import Element, merge_elements  # WinRT: only importable once Whisper has loaded
 
         record: list = entry.setdefault("explore", [])
         deadline = time.monotonic() + EXPLORE_S
@@ -725,7 +832,7 @@ class App:
             if found.ok:
                 return StepOutcome(found, None, scr)
             if found.question is not None:
-                return StepOutcome(self._ask_user(found.question, label, entry), None, scr)
+                return self._question_outcome(found.question, label, entry, scr)
             return None
 
         def seen(scr: Screen) -> tuple:
@@ -742,6 +849,20 @@ class App:
                 return found
             screen = closer
         tried.append({"probe": "read the whole screen more closely", "result": "still not found"})
+
+        # 1b. Look at the screenshot: the vision model points out icons, images and colours OCR can't read, and
+        # they become candidates Jev can pick (and the AI's probes can click).
+        if self.vision is not None and not out_of_budget():
+            self.status("thinking", f"{label}Exploring: looking at the screen ({self.vision.name})…")
+            seen_items = self._run_llm(self.vision.locate, step, screen)
+            if seen_items:
+                visual = [Element("v", text, l, t, r - l, b - t) for text, (l, t, r, b) in seen_items]
+                screen = merge_elements(screen, visual)
+                record.append({"vision": [(text, box) for text, box in seen_items]})
+                if found := check(screen, f"looked at the screenshot: {', '.join(text for text, _ in seen_items)}"):
+                    return found
+            tried.append({"probe": "looked at the screenshot for icons and images",
+                          "result": f"found {', '.join(t for t, _ in seen_items)}, but not the target" if seen_items else "nothing relevant"})
 
         # 2. Scroll down through the window.
         centre = foreground_center()
@@ -786,7 +907,7 @@ class App:
                 return None
             self.status("thinking", f"{label}Exploring with {self.planner.name}…  Esc to cancel")
             result = self._run_llm(self.planner.explore, step, context.get("full_request", step),
-                                   context.get("steps_done", []), current, tried)
+                                   context.get("steps_done", []), current, tried, self._journal.for_ai())
             if result is None:
                 return None
             thinking, probes = result
@@ -810,6 +931,8 @@ class App:
                 changed = seen(after) != seen(current)
                 tried.append({"probe": desc, "result": "the screen changed, but it's still not there" if changed
                               else "nothing new appeared"})
+                self._journal.add("look", what=f'exploring for "{step[:40]}": {desc}',
+                                  result=describe_change(current, after) + "; not found there")
                 current = after
                 if changed:
                     break  # a new screen: ask the AI again, with what's on it now
@@ -825,7 +948,7 @@ class App:
             ref = (probe.get("element") or "").strip()
             el = next((e for e in screen.elements if e.id == ref), None) or \
                 next((e for e in screen.elements if e.text.lower() == ref.lower()), None)
-            if el is None or _DANGEROUS.search(el.text):
+            if el is None or (self._guarded and _DANGEROUS.search(el.text)):
                 return None
             verb = {"click": "Clicked", "double_click": "Double-clicked", "right_click": "Right-clicked"}[action]
             self.status("thinking", f'{label}Exploring: {verb.lower()[:-2]}ing "{el.text[:40]}"…')
@@ -845,7 +968,7 @@ class App:
             return f"scrolled {direction}"
         if action == "press_key":
             key = (probe.get("key") or "").strip().lower()
-            if not key or key in _BLOCKED_KEYS or not valid_hotkey(key):
+            if not key or (self._guarded and key in _BLOCKED_KEYS) or not valid_hotkey(key):
                 return None
             self.status("thinking", f"{label}Exploring: pressing {key}…")
             self._execute(Plan(True, f"Press {key}", kind="press_key", key=key))
@@ -857,6 +980,11 @@ class App:
             self.status("thinking", f"{label}Exploring: looking closely at the {region}…")
             return f"looked closely at the {region} of the screen"
         return None
+
+    @property
+    def _guarded(self) -> bool:
+        """Refuse irreversible clicks/keys while exploring, unless YOLO mode explicitly allows them."""
+        return not (self.settings.yolo and self.settings.yolo_allow_irreversible)
 
     def _run_llm(self, fn, *args):
         """Call the AI planner without blocking Esc: None if cancelled or it failed (the user is told)."""
@@ -911,9 +1039,12 @@ class App:
         Returns q.complete(payload or text): a Plan for Jev's questions, the answer text for the AI planner's.
         None if cancelled, unanswered or unclear (the user has been told).
         """
+        if self.settings.yolo:
+            return self._auto_answer(q, label, entry)
         while not self._answers.empty():
             self._answers.get_nowait()
-        options = [*q.options, ("Cancel", _CANCEL)]
+        rethink = [("None of these: have the AI rethink", _RETHINK)] if self.planner is not None else []
+        options = [*q.options, *rethink, ("Cancel", _CANCEL)]
         self._question, self._question_options = q, options
         self._answer_keys = {str(i) for i in range(1, min(len(options), 9) + 1)}
         record = {"question": q.prompt, "options": [o for o, _ in options]}
@@ -954,17 +1085,52 @@ class App:
             idx = spoken_choice(answer, len(options))
             if idx is None and q.kind == "text":
                 text = clean_span(answer)
+                self._journal.add("question", question=q.prompt, answer=f'the user said "{text}"')
                 return q.complete(text) if text else None
             if idx is None:
                 idx = self.decider.pick(q.prompt, answer, [o for o, _ in options])  # e.g. said an option's name
+            if idx is None and self.planner is not None:
+                # Something other than the options: the AI rethinks with the user's answer.
+                return Rethink(f'the user answered "{answer}", which matched none of the options')
             if idx is None:
                 self._fail(f"“{answer}” didn't match an option, so I stopped")
                 return None
         record["picked"] = idx + 1
         payload = options[idx][1]
+        self._journal.add("question", question=q.prompt, answer=f"the user chose {_quoted(options[idx][0])}")
         if payload is _CANCEL:
             self.status("warn", "Cancelled", 2500)
             return None
+        if payload is _RETHINK:
+            return Rethink("the user said none of the options fit")
+        return q.complete(payload)
+
+    def _question_outcome(self, q: Question, label: str, entry: dict, screen: Screen) -> StepOutcome:
+        """Ask a step's question. If none of its options fit, that becomes the step's problem, which hands it to
+        the AI planner to work out new steps."""
+        answer = self._ask_user(q, label, entry)
+        if isinstance(answer, Rethink):
+            options = ", ".join(o for o, _ in q.options)
+            return StepOutcome(None, f'I asked "{q.prompt}" (options: {options}) but {answer.reason}', screen)
+        return StepOutcome(answer, None, screen)
+
+    def _auto_answer(self, q: Question, label: str, entry: dict):
+        """YOLO mode: answer a question without the user, with its first (most likely) option."""
+        record = {"question": q.prompt, "options": [o for o, _ in q.options], "auto": True}
+        entry.setdefault("questions", []).append(record)
+        if not q.options:
+            record["picked"] = None
+            self._fail(f"{label}YOLO mode couldn't decide: {q.prompt}")
+            return None
+        text, payload = q.options[0]
+        if self.planner is not None and self.decider.option_fits(self._command, q.prompt, text) < 0.5:
+            record["picked"] = "rethink"
+            log.info("YOLO: %s -> none of %s fit; asking the AI", q.prompt, [o for o, _ in q.options])
+            return Rethink("none of the options fit the request")
+        record["picked"] = 1
+        self._journal.add("question", question=q.prompt, answer=f"decided automatically (YOLO): {_quoted(text)}")
+        log.info("YOLO: %s -> %s", q.prompt, text)
+        self.status("thinking", f"{label}{q.prompt} → {text} (decided automatically)")
         return q.complete(payload)
 
     def _answer_key_filter(self, e: keyboard.KeyboardEvent) -> bool:

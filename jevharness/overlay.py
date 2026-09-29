@@ -24,6 +24,7 @@ DEFAULT_DOTS = {
     "warn": "#fbbc04",
     "error": "#ea4335",
     "question": "#8ab4f8",
+    "yolo": "#c77dff",  # idle in YOLO mode
 }
 _MOVE_TEXT = "Drag to move · double-click to drop it here"
 _CHECK_BG = "#3c4043"

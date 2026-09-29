@@ -15,6 +15,7 @@ from .overlay import DEFAULT_BG, DEFAULT_DOTS, DEFAULT_FG
 from .settings import get_api_key, set_api_key
 
 _PROVIDER_LABELS = {"off": "Off", "openrouter": "OpenRouter", "ollama": "Ollama (local)"}
+_SAME_AS_PLANNER = "Same as the planner"
 _MODE_LABELS = {"confused": "Only when Jev is confused", "always": "Always (rewrite every command first)"}
 _POSITION_LABELS = {
     "bottom-centre": "Bottom centre (above taskbar)",
@@ -34,6 +35,7 @@ _DOT_LABELS = {
     "question": ("Question", "Click which one?  1) …  2) …"),
     "warn": ("Warning", "Couldn't find it on this screen"),
     "error": ("Error", "Couldn't reach TypeSafe"),
+    "yolo": ("YOLO idle", ""),
 }
 
 
@@ -112,6 +114,17 @@ class SettingsDialog:
         ttk.Spinbox(f, from_=0.0, to=1.0, increment=0.05, textvariable=self.min_target, width=6).grid(row=4, column=1, sticky="w", pady=(8, 0))
         ttk.Checkbutton(f, text="Dry run: highlight what would happen without doing it", variable=self.dry_run).grid(
             row=5, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        self.yolo = tk.BooleanVar(value=s.yolo)
+        self.yolo_irreversible = tk.BooleanVar(value=not s.yolo_allow_irreversible)
+        ttk.Checkbutton(f, text="YOLO mode: decide everything without asking me", variable=self.yolo,
+                        command=self._yolo_changed).grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self.yolo_safety_check = ttk.Checkbutton(
+            f, text="…but still refuse irreversible actions (delete, buy, send, sign out…)", variable=self.yolo_irreversible)
+        self.yolo_safety_check.grid(row=7, column=0, columnspan=3, sticky="w", padx=(22, 0), pady=(4, 0))
+        self._yolo_changed()
+
+    def _yolo_changed(self) -> None:
+        self.yolo_safety_check.state(["!disabled"] if self.yolo.get() else ["disabled"])
 
     # ---- AI planner -----------------------------------------------------------------
 
@@ -153,6 +166,17 @@ class SettingsDialog:
         self.keep_alive_check = ttk.Checkbutton(
             f, text="Keep the model loaded in memory (Ollama; uses GPU memory while the app runs)", variable=self.llm_keep_alive)
         self.keep_alive_check.grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        _row(f, 9, "Vision model")
+        self.vision_model = tk.StringVar(value=s.vision_model or _SAME_AS_PLANNER)
+        self.vision_box = ttk.Combobox(f, textvariable=self.vision_model, values=[_SAME_AS_PLANNER], width=34)
+        self.vision_box.grid(row=9, column=1, columnspan=2, sticky="w", pady=(12, 0))
+        ttk.Label(f, text="Finds icons and images on the screenshot when text isn't enough. It must point accurately:\n"
+                          "Test connections checks it (e.g. qwen3.8 can, gemma4 can't).",
+                  foreground="#5f6368").grid(row=10, column=1, columnspan=2, sticky="w")
+
+    def _vision_choice(self) -> str:
+        v = self.vision_model.get().strip()
+        return "" if v in ("", _SAME_AS_PLANNER) else v
 
     def _provider_id(self) -> str:
         return next(k for k, v in _PROVIDER_LABELS.items() if v == self.provider.get())
@@ -199,22 +223,24 @@ class SettingsDialog:
         def run():
             try:
                 models = planner.list_models()
+                vision = planner.list_vision_models()
                 if planner.provider == "openrouter":
-                    msg = f"{len(models)} models available with structured output"
+                    msg = f"{len(models)} models available with structured output ({len(vision)} take images)"
                 elif models:
-                    msg = f"{len(models)} local models can generate text (embedding-only models are hidden)"
+                    msg = f"{len(models)} local models can generate text, {len(vision)} can see images (embedding-only models are hidden)"
                 else:
                     msg = "Ollama has no models that can generate text yet: run `ollama pull <model>` first"
             except Exception as e:
-                models, msg = [], f"Couldn't load models: {e}"
-            self.app.ui(self._models_loaded, models, msg)
+                models, vision, msg = [], [], f"Couldn't load models: {e}"
+            self.app.ui(self._models_loaded, models, vision, msg)
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _models_loaded(self, models: list[str], msg: str) -> None:
+    def _models_loaded(self, models: list[str], vision: list[str], msg: str) -> None:
         if not self.win.winfo_exists():
             return
         self.model_box.configure(values=models)
+        self.vision_box.configure(values=[_SAME_AS_PLANNER, *vision])
         current = self.llm_model.get()
         if models and current not in models:
             # The current choice isn't usable (e.g. an embedding model, or blank): offer the first one that is.
@@ -421,6 +447,14 @@ class SettingsDialog:
                         self._served_by_test = True
                     planner.ping()
                     lines.append(f"AI planner: {planner.model} replied" + (f" ({served})." if served else "."))
+                    if self.llm_screenshot.get():
+                        vision = planner if not self._vision_choice() else Planner(
+                            planner.provider, self._vision_choice(), self.llm_key.get().strip() or None,
+                            self.llm_url.get().strip() or None, True, timeout_s=120, keep_alive=self.llm_keep_alive.get())
+                        self.app.ui(self.status.set, f"Checking whether {vision.model} can point at things…")
+                        hits, tries = vision.pointing_check()
+                        verdict = "good" if hits == tries else "unreliable: pick another vision model" if hits < tries - 1 else "mostly OK"
+                        lines.append(f"Vision: {vision.model} pointed at {hits}/{tries} test shapes ({verdict}).")
                 except Exception as e:
                     lines.append(f"AI planner: failed ({str(e)[:120]}).")
             self.app.ui(self._test_done, " ".join(lines))
@@ -446,6 +480,8 @@ class SettingsDialog:
         s = self.app.settings
         s.model = self.model.get().strip() or "jev-latest"
         s.dry_run = self.dry_run.get()
+        s.yolo = self.yolo.get()
+        s.yolo_allow_irreversible = not self.yolo_irreversible.get()
         s.min_action_prob = min(1.0, max(0.0, min_action))
         s.min_target_prob = min(1.0, max(0.0, min_target))
         pid = self._provider_id()
@@ -455,6 +491,7 @@ class SettingsDialog:
         s.llm_mode = next(k for k, v in _MODE_LABELS.items() if v == self.llm_mode.get())
         s.llm_screenshot = self.llm_screenshot.get()
         s.llm_keep_alive = self.llm_keep_alive.get()
+        s.vision_model = self._vision_choice()
         s.powertoys_search = self.powertoys.get()
         s.search_hotkey = hotkey
         s.overlay_bg, s.overlay_fg = self.style["bg"], self.style["fg"]

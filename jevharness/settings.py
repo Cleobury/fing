@@ -23,6 +23,9 @@ log = logging.getLogger(__name__)
 @dataclass
 class Settings:
     dry_run: bool = False
+    # YOLO mode: decide everything without asking (top option, AI's choice, no "keep going?" check-ins).
+    yolo: bool = False
+    yolo_allow_irreversible: bool = False  # in YOLO mode, also allow deleting, buying, sending, signing out...
     model: str = "jev-latest"
     # Minimum probability of Jev's chosen action / on-screen target before we act.
     min_action_prob: float = 0.5
@@ -36,6 +39,8 @@ class Settings:
     llm_mode: str = "confused"  # "confused": only when Jev struggles; "always": rewrite every command first
     llm_screenshot: bool = True
     llm_keep_alive: bool = False  # Ollama: keep the model loaded in memory instead of unloading after 5 minutes idle
+    # Model that finds icons/images on the screenshot (needs to point accurately); blank = the planner model.
+    vision_model: str = ""
     # Search the PC with PowerToys (Command Palette / PowerToys Run) via this hotkey instead of the Start menu.
     powertoys_search: bool = False
     search_hotkey: str = "left alt+space"
