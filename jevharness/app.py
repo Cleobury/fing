@@ -49,6 +49,7 @@ from .desktop import (
     wait_until_settled,
 )
 from .journal import Journal, describe_change
+from .scripts import Script, breakdown_key, check_of, load_scripts, save_scripts, split_lines, wait_of, write_report
 from .llm import PROVIDERS, Planner
 from .search import valid_hotkey
 from .overlay import Highlight, Overlay
@@ -79,6 +80,9 @@ STUCK_ROUNDS = 3  # rounds in a row without progress before asking the user what
 CHECK_IN_EVERY = 20  # actions beyond what was said between "keep going?" check-ins
 YOLO_MAX_EXTRA = 30  # YOLO mode has no check-ins: stop after this many actions beyond what was said
 YOLO_MAX_STUCK = 2  # YOLO mode: new approaches to try when stuck before giving up
+SCRIPT_MATCH = 0.6  # how sure Jev must be that a command asks to run a saved script
+CHECK_PASS = 0.7  # a script's "check: …" passes when Jev rates the condition at least this likely (strict, for tests)
+CHECK_WAIT_S = 3  # how long a failing check waits for the screen to change before it's recorded as failed
 IRREVERSIBLE = 0.5  # YOLO safe mode stops before an action Jev rates at least this likely to be hard to undo
 DONE_THRESHOLD = 0.5  # after the last step, keep going (Jev, else the AI planner) while Jev's "request is done" is below this
 LOADING = 0.5  # Jev's "screen is still loading" probability that makes a failing step wait
@@ -191,6 +195,7 @@ class App:
         self._last_action_t = 0.0
         self._marked_done = False  # the user clicked ✓: stop, and report success rather than "stopped"
         self._command = ""  # the request being worked on
+        self._script: Script | None = None  # the saved script being run, if any
         self._journal = Journal()  # what has happened while carrying it out (see journal.py)
         self._ai_steps: set[str] = set()  # steps that came from the AI planner, for the journal
         self._step_last_worked: float | None = None  # set by _resolve_step: Jev's verdict on the previous action
@@ -470,8 +475,12 @@ class App:
 
     def _handle_command(self, audio: np.ndarray, ocr_future: Future, released_t: float) -> None:
         entry: dict = {"time": datetime.now().isoformat(timespec="seconds"), "audio_s": round(len(audio) / SAMPLE_RATE, 2)}
+        self._run_safely(entry, lambda: self._run_command(audio, ocr_future, released_t, entry))
+
+    def _run_safely(self, entry: dict, run) -> None:
+        """Run a command or script on the work thread, reporting errors and always logging it."""
         try:
-            self._run_command(audio, ocr_future, released_t, entry)
+            run()
         except TypeSafeAuthenticationError:
             entry["error"] = "auth"
             self.status("error", "TypeSafe rejected the API key: check Settings", 5000)
@@ -509,6 +518,9 @@ class App:
         self.status("thinking", f"“{command}”")
         recent = self._recent_actions()
         entry.update(dry_run=self.settings.dry_run, results=[], replans=[])
+        if (script := self._match_script(command, entry)) is not None:
+            self._run_script(script, entry, released_t, screen)
+            return
         if self.planner and self.settings.llm_mode == "always":
             steps = self._replan(command, [], screen, None, entry)
             if steps is None:
@@ -520,13 +532,22 @@ class App:
             steps, seg_log = self.decider.segment(command, recent)
             entry.update(split_ms=round((time.perf_counter() - t) * 1000), split=seg_log)
         entry["steps"] = list(steps)
+        self._carry_out(command, steps, screen, recent, entry, released_t)
 
-        pending = list(steps)
+    def _carry_out(self, command: str, steps: list, screen: Screen, recent: list[str], entry: dict,
+                   released_t: float, script: Script | None = None) -> None:
+        """The step loop: carry out `steps` for `command` until it's done (or stopped), escalating from Jev to the
+        AI planner to asking the user as needed. With a `script`, its steps run strictly in order: a failing step
+        is fixed on its own by the AI (the rest of the script carries on), and each step's result is reported."""
+        pending = [] if script is not None else list(steps)
+        script_queue = list(steps) if script is not None else []
+        results: list[dict] = []  # script mode: one per script step
+        started = time.time()
         done: list[str] = []
         guidance: list[tuple[str, str]] = []  # the user's answers when asked how to get unstuck
         stuck = 0  # rounds in a row without progress: failed steps, repeated actions, or an unchanged screen
         yolo_escalations = 0  # YOLO mode: times it was stuck and tried a new approach instead of asking
-        entry["yolo"] = self.settings.yolo
+        entry["yolo"] = self._autonomous
         self._command = command
         self._journal = journal = Journal()
         entry["journal"] = journal.events
@@ -535,6 +556,14 @@ class App:
         fresh = True  # `screen` is current for the next step
         # Keep going until Jev judges the request done, or the user presses Esc / Right Ctrl.
         while not self._cancel.is_set():
+            if not pending and script is not None:
+                if results and results[-1]["status"] == "running":
+                    results[-1]["status"] = "ok"
+                if not script_queue:
+                    break
+                results.append({"n": len(results) + 1, "step": script_queue.pop(0), "status": "running", "actions": []})
+                pending, stuck = [results[-1]["step"]], 0
+                continue
             if not pending:
                 if not done:
                     break
@@ -555,8 +584,8 @@ class App:
                 stuck = stuck + 1 if seen == last_seen else 0
                 last_seen = seen
                 extra = len(done) - len(steps)
-                if self.settings.yolo and extra >= YOLO_MAX_EXTRA:
-                    self._fail(f"YOLO mode: stopped after {extra} extra actions without finishing")
+                if self._autonomous and extra >= YOLO_MAX_EXTRA:
+                    self._fail(f"{self._auto_name}: stopped after {extra} extra actions without finishing")
                     break
                 if extra > 0 and extra % CHECK_IN_EVERY == 0 and not self._keep_going(command, entry):
                     break
@@ -567,6 +596,27 @@ class App:
                 label = f"[{len(done) + 1}/{len(done) + 1 + len(pending)}] " if not continuing else f"[{len(done) + 1}] "
                 if len(steps) == 1 and not done and not pending:
                     label = ""
+                if script is not None:
+                    label = f"[{script.name} {len(results)}/{len(results) + len(script_queue)}] "
+                if (condition := check_of(step)) is not None:
+                    passed, p_holds, screen = self._verify(condition, label)
+                    fresh = True
+                    journal.add("verify", condition=condition, passed=passed, p=round(p_holds, 2))
+                    entry.setdefault("checks", []).append({"condition": condition, "passed": passed, "p": round(p_holds, 2)})
+                    if results:
+                        results[-1].update(status="passed" if passed else "failed",
+                                           note=f"check {'passed' if passed else 'FAILED'}: {condition} ({p_holds:.0%})")
+                    self.status("done" if passed else "warn", f"{label}{'✓' if passed else '✗'} {condition}", 2500)
+                    if not passed and script is not None and script.stop_on_failure:
+                        break
+                    continue
+                if (seconds := wait_of(step)) is not None:
+                    self.status("thinking", f"{label}Waiting {seconds:g} s…")
+                    end = time.monotonic() + seconds
+                    while time.monotonic() < end and not self._cancel.is_set():
+                        time.sleep(0.1)
+                    fresh = False
+                    continue
                 if not fresh:
                     screen = self.perception.capture([self.overlay.rect], follow="foreground")
                 fresh = False
@@ -593,16 +643,20 @@ class App:
                         more = f", then {len(pending)} more step{'s' * (len(pending) > 1)}" if pending else ""
                         self.status("done", f"Would: {p.description}{more}", 4000)
                         break
-                    if self.settings.yolo and not self.settings.yolo_allow_irreversible:
+                    if self._autonomous and not self.settings.yolo_allow_irreversible:
                         # Nobody is confirming, so check the action itself rather than trusting the AI's plan.
                         risk = self.decider.is_irreversible(command, p.description, out.screen)
                         entry.setdefault("irreversible_checks", []).append({"action": p.description, "p": round(risk, 2)})
                         if risk > IRREVERSIBLE:
-                            self._fail(f"YOLO mode: “{p.description}” looks hard to undo, so I stopped "
+                            self._fail(f"{self._auto_name}: “{p.description}” looks hard to undo, so I stopped "
                                        "(allow it in Settings → Jev)")
+                            if results:
+                                results[-1].update(status="failed", note=f'stopped before "{p.description}": looks hard to undo')
                             break
                     source = ("Jev (next step toward the request)" if continuing else "the AI planner"
-                              if step in self._ai_steps else "the user's words")
+                              if step in self._ai_steps else "the script" if script is not None else "the user's words")
+                    if results:
+                        results[-1]["actions"].append(p.description)
                     event = journal.action("(the next step toward the request)" if continuing else step, p.description, source)
                     before = foreground_window()
                     self._execute(p)
@@ -626,13 +680,29 @@ class App:
                 problem = f'The step "{"finish the request" if continuing else step}" failed: {out.problem}'
                 journal.add("failed", step="finish the request" if continuing else step, reason=out.problem)
 
+            if script is not None:
+                # A script step failed: give up on it after a few tries (stop, or move on), else let the AI fix just it.
+                if stuck >= STUCK_ROUNDS or self.planner is None:
+                    results[-1].update(status="failed", note=problem)
+                    if script.stop_on_failure:
+                        break
+                    pending, stuck = [], 0
+                    continue
+                current = results[-1]["step"]
+                fix = self._further_steps(f'{current} (step {results[-1]["n"]} of the script "{script.name}")', done,
+                                          screen, problem, guidance, entry)
+                if fix is None:
+                    break
+                pending = [current if s is CONTINUE else s for s in fix]
+                continue
+
             # Not done yet: work out the further steps (the AI planner's list, else Jev's next action).
-            if stuck >= STUCK_ROUNDS and self.settings.yolo:
+            if stuck >= STUCK_ROUNDS and self._autonomous:
                 # Nobody to ask: tell the AI to try something different, and give up after a couple of goes.
                 yolo_escalations += 1
                 entry.setdefault("stuck", []).append(problem)
                 if yolo_escalations > YOLO_MAX_STUCK or self.planner is None:
-                    self._fail(f"YOLO mode: stuck on “{command[:50]}”, so I stopped")
+                    self._fail(f"{self._auto_name}: stuck on “{command[:50]}”, so I stopped")
                     break
                 stuck = 0
                 guidance.append(("I'm stuck. What should I do next?",
@@ -661,6 +731,8 @@ class App:
         elif self._cancel.is_set():
             self.status("warn", f"Stopped after {len(done)} step{'s' * (len(done) != 1)}", 3000)
             entry["cancelled_after"] = len(done)
+        if script is not None:
+            self._finish_script(script, results, script_queue, started, entry)
         entry["total_ms_after_release"] = round((time.perf_counter() - released_t) * 1000)
         log.info("%s -> %s (%s ms after release)", command, done, entry["total_ms_after_release"])
 
@@ -720,7 +792,7 @@ class App:
                                      "understanding": lp.understanding, "steps": lp.steps, "question": lp.question})
             if lp.steps:
                 self._journal.add("plan", steps=lp.steps, why=lp.understanding)
-            if lp.question and not lp.steps and self.settings.yolo and not lp.options:
+            if lp.question and not lp.steps and self._autonomous and not lp.options:
                 answers.append((lp.question, "The user isn't available (YOLO mode): decide yourself."))
                 continue
             if lp.question and not lp.steps:
@@ -982,9 +1054,114 @@ class App:
         return None
 
     @property
+    def _autonomous(self) -> bool:
+        """Decide without asking: YOLO mode, or an unattended script."""
+        return self.settings.yolo or bool(self._script and self._script.unattended)
+
+    @property
+    def _auto_name(self) -> str:
+        return f'Script "{self._script.name}"' if self._script else "YOLO mode"
+
+    # ---- scripts ---------------------------------------------------------------------
+
+    def _match_script(self, command: str, entry: dict) -> Script | None:
+        """The saved script `command` asks to run ("run the notepad test"), if any."""
+        scripts = load_scripts()
+        if not scripts:
+            return None
+        idx, p = self.decider.pick_script(command, [s.name for s in scripts])
+        entry["script_match"] = {"script": scripts[idx].name if idx is not None else None, "p": round(p, 2)}
+        return scripts[idx] if idx is not None and p >= SCRIPT_MATCH else None
+
+    def _script_steps(self, script: Script) -> list[str]:
+        """The script as steps: the AI's cached breakdown (made now if the script changed), else one per line."""
+        if self.planner is None:
+            return split_lines(script.text)
+        key = breakdown_key(script.text, self.planner.model)
+        if script.steps and script.steps_key == key:
+            return list(script.steps)
+        self.status("thinking", f'Breaking "{script.name}" into steps ({self.planner.name})…')
+        steps = self._run_llm(self.planner.break_script, script.name, script.text)
+        if not steps:
+            return split_lines(script.text)
+        script.steps, script.steps_key = steps, key
+        saved = load_scripts()
+        save_scripts([script if s.name == script.name else s for s in saved])
+        return steps
+
+    def _run_script(self, script: Script, entry: dict, released_t: float, screen: Screen | None = None) -> None:
+        steps = self._script_steps(script)
+        if self._cancel.is_set():
+            return
+        if not steps:
+            self._fail(f'Script "{script.name}" has no steps')
+            return
+        entry.update(script=script.name, steps=steps, dry_run=self.settings.dry_run)
+        entry.setdefault("results", [])
+        entry.setdefault("replans", [])
+        self.status("thinking", f'Running "{script.name}" ({len(steps)} steps)…')
+        screen = screen or self.perception.capture([self.overlay.rect], follow="foreground")
+        self._script = script
+        planner_autonomous = self.planner.autonomous if self.planner else False
+        if self.planner and script.unattended:
+            self.planner.autonomous = True
+        try:
+            self._carry_out(f'the script "{script.name}":\n{script.text}', steps, screen, [], entry, released_t, script)
+        finally:
+            self._script = None
+            if self.planner:
+                self.planner.autonomous = planner_autonomous
+
+    def _finish_script(self, script: Script, results: list[dict], left: list, started: float, entry: dict) -> None:
+        """Summarise a script run on the indicator and save its report."""
+        if results and results[-1]["status"] == "running":
+            results[-1]["status"] = "failed" if self._cancel.is_set() and not self._marked_done else "ok"
+            if self._cancel.is_set() and not self._marked_done:
+                results[-1]["note"] = "stopped by the user"
+        n = len(results)
+        results += [{"n": n + i + 1, "step": s, "status": "skipped", "actions": []} for i, s in enumerate(left)]
+        failed = [r for r in results if r["status"] == "failed"]
+        checks = [r for r in results if check_of(r["step"]) is not None and r["status"] in ("passed", "failed")]
+        passed = sum(r["status"] == "passed" for r in checks)
+        check_note = f", checks {passed}/{len(checks)} passed" if checks else ""
+        if failed:
+            summary = f"failed at step {failed[0]['n']} of {len(results)}{check_note}"
+        elif any(r["status"] == "skipped" for r in results):
+            summary = f"stopped after {n} of {len(results)} steps{check_note}"
+        else:
+            summary = f"all {len(results)} steps done{check_note}"
+        report = {"script": script.name, "started": datetime.fromtimestamp(started).isoformat(timespec="seconds"),
+                  "seconds": round(time.time() - started, 1), "summary": summary, "steps": results,
+                  "unattended": script.unattended, "stop_on_failure": script.stop_on_failure}
+        try:
+            entry["script_report"] = write_report(script.name, report)
+        except OSError:
+            log.exception("Couldn't save the script report")
+        entry["script_summary"] = summary
+        (self._fail if failed else lambda t: self.status("done", t, 6000))(f'Script "{script.name}": {summary}')
+
+    def run_script(self, name: str) -> None:
+        """Tray menu / Settings → Run: start a saved script (Tk thread)."""
+        if self.busy:
+            self.status("warn", "Busy with something else: Esc to stop it first", 2500)
+            return
+        if not self.model_ready or self.decider is None:
+            self.status("error", "Not ready: check the TypeSafe key in Settings", 3000)
+            return
+        script = next((s for s in load_scripts() if s.name == name), None)
+        if script is None:
+            self.status("error", f'No script called "{name}"', 3000)
+            return
+        self.busy = True
+        self._cancel.clear()
+        self._marked_done = False
+        entry: dict = {"time": datetime.now().isoformat(timespec="seconds"), "command": f'(run script "{name}")'}
+        self._work_pool.submit(self._run_safely, entry, lambda: self._run_script(script, entry, time.perf_counter()))
+
+    @property
     def _guarded(self) -> bool:
         """Refuse irreversible clicks/keys while exploring, unless YOLO mode explicitly allows them."""
-        return not (self.settings.yolo and self.settings.yolo_allow_irreversible)
+        return not (self._autonomous and self.settings.yolo_allow_irreversible)
 
     def _run_llm(self, fn, *args):
         """Call the AI planner without blocking Esc: None if cancelled or it failed (the user is told)."""
@@ -999,6 +1176,19 @@ class App:
             log.exception("AI planner call failed")
             self.status("warn", f"AI planner failed ({str(e)[:60]})", 3000)
             return None
+
+    def _verify(self, condition: str, label: str) -> tuple[bool, float, Screen]:
+        """A "check: …" step: does `condition` hold on screen? If not at first, give the screen a few seconds to
+        change (it may still be loading) and look again. Returns (passed, probability, the screen judged)."""
+        self.status("thinking", f"{label}Checking: {condition}")
+        screen = self.perception.capture([self.overlay.rect], follow="foreground")
+        p_holds = self.decider.check(condition, screen)
+        if p_holds < CHECK_PASS:
+            changed = self._wait_for_change(screen, time.monotonic() + CHECK_WAIT_S, label)
+            if changed is not None:
+                screen = changed
+                p_holds = self.decider.check(condition, screen)
+        return p_holds >= CHECK_PASS, p_holds, screen
 
     def _wait_for_change(self, screen: Screen, until: float, label: str) -> Screen | None:
         """Re-read the screen until its text changes (then return it, once settled), or None at `until`."""
@@ -1039,7 +1229,7 @@ class App:
         Returns q.complete(payload or text): a Plan for Jev's questions, the answer text for the AI planner's.
         None if cancelled, unanswered or unclear (the user has been told).
         """
-        if self.settings.yolo:
+        if self._autonomous:
             return self._auto_answer(q, label, entry)
         while not self._answers.empty():
             self._answers.get_nowait()
@@ -1120,7 +1310,7 @@ class App:
         entry.setdefault("questions", []).append(record)
         if not q.options:
             record["picked"] = None
-            self._fail(f"{label}YOLO mode couldn't decide: {q.prompt}")
+            self._fail(f"{label}{self._auto_name} couldn't decide: {q.prompt}")
             return None
         text, payload = q.options[0]
         if self.planner is not None and self.decider.option_fits(self._command, q.prompt, text) < 0.5:

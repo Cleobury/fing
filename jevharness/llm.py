@@ -39,6 +39,7 @@ Actions:
   (else null); submit = true to press Enter afterwards (searches, URLs, sending a chat message).
 - press_key: key = one key or shortcut, e.g. "enter", "escape", "ctrl+l", "alt+left".
 - scroll: direction = "up" or "down".
+- check: text = a condition to verify on screen (for scripts and tests); wait: text = seconds to pause.
 - drag: press on `target` (its visible text) and drop it on `destination` (another element's visible text), or
   `direction` "left"/"right"/"up"/"down" for a short move (a slider, a window).
 - search_pc: search the computer (files, folders, settings, programs not in the app list) with the system search
@@ -72,7 +73,7 @@ SCHEMA = {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["open_app", "click", "double_click", "right_click", "type",
-                                                          "press_key", "scroll", "search_pc", "drag"]},
+                                                          "press_key", "scroll", "search_pc", "drag", "check", "wait"]},
                     "target": {"type": ["string", "null"]},
                     "text": {"type": ["string", "null"]},
                     "key": {"type": ["string", "null"]},
@@ -182,6 +183,24 @@ LOCATE_SCHEMA = {
 }
 
 
+SCRIPT_SYSTEM = """You help a voice-controlled computer assistant run a saved script: a list of tasks written in
+plain language by the user, e.g. for testing an app or a routine they repeat. Break it into the simple steps the
+assistant's executor carries out one at a time (it reads the screen with OCR and matches each step to it).
+
+Actions: the same as ever (open_app, click, double_click, right_click, type, press_key, scroll, search_pc, drag),
+plus:
+- check: text = a condition to verify on screen at that point, e.g. "the title bar says Untitled - Notepad". Use it
+  wherever the script says check, verify, make sure, expect or assert, and for the expected outcome of a test.
+- wait: text = seconds to pause, where the script asks to wait.
+
+Rules:
+- Keep the script's order and meaning exactly. One simple action per step; split compound lines.
+- Don't add anything the script doesn't ask for or clearly imply (e.g. opening the app it's about).
+- Use the exact labels the script gives for buttons and fields.
+- Never ask a question: the script must run unattended. `question` is always null; `options` is empty.
+- `understanding`: one short sentence saying what the script does."""
+
+
 @dataclass
 class LlmPlan:
     understanding: str
@@ -208,6 +227,10 @@ def to_command(s: dict) -> str | None:
         case "drag" if target and (s.get("destination") or s.get("direction")):
             where = f'onto "{s["destination"]}"' if s.get("destination") else f"{s['direction']}"
             return f'drag "{target}" {where}'
+        case "check" if text:
+            return f"check: {text}"
+        case "wait":
+            return f"wait: {text or 2}"
         case "search_pc" if text or target:
             return f'search the PC for "{text or target}"'
     return None
@@ -460,6 +483,20 @@ class Planner:
                 cx, cy = (l + r) / 2, (t + b) / 2
                 hits += x0 - 20 <= cx <= x1 + 20 and y0 - 20 <= cy <= y1 + 20
         return hits, len(targets)
+
+    def break_script(self, name: str, text: str) -> list[str]:
+        """Break a saved script into simple steps (including "check: …" and "wait: …" steps)."""
+        body = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": SCRIPT_SYSTEM},
+                         {"role": "user", "content": json.dumps({"script_name": name, "script": text}, ensure_ascii=False)}],
+            "temperature": 0.0,
+            "response_format": {"type": "json_schema", "json_schema": {"name": "plan", "strict": True, "schema": SCHEMA}},
+        }
+        if self.provider == "openrouter":
+            body["provider"] = {"require_parameters": True}
+        data = self._chat(body)
+        return [c for c in (to_command(s) for s in data.get("steps") or []) if c]
 
     def _chat(self, body: dict, schema: dict = SCHEMA) -> dict:
         if self.keep_alive:

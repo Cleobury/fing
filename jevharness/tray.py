@@ -6,6 +6,7 @@ import threading
 import pystray
 from PIL import Image, ImageDraw, ImageFont
 
+from .scripts import load_scripts
 from .settings import LOG_DIR
 
 
@@ -39,6 +40,7 @@ class Tray:
                 pystray.MenuItem("Dry run (show, don't act)", lambda: app.ui(app.toggle_dry_run), checked=lambda _: app.settings.dry_run),
                 pystray.MenuItem("YOLO mode (decide everything itself)", lambda: app.ui(app.toggle_yolo),
                                  checked=lambda _: app.settings.yolo),
+                pystray.MenuItem("Run script", pystray.Menu(lambda: self._script_items())),
                 pystray.MenuItem("Move indicator", lambda: app.ui(app.move_overlay)),
                 pystray.MenuItem("Reset indicator position", lambda: app.ui(app.reset_overlay_position)),
                 pystray.MenuItem("Open logs folder", lambda: os.startfile(LOG_DIR)),
@@ -47,6 +49,17 @@ class Tray:
             ),
         )
         threading.Thread(target=self.icon.run, daemon=True, name="tray").start()
+
+    def _script_items(self):
+        """The Run script submenu, rebuilt each time it opens so it lists the scripts saved now."""
+        def run(name: str):
+            return lambda: self.app.ui(self.app.run_script, name)
+
+        scripts = load_scripts()
+        if not scripts:
+            yield pystray.MenuItem("(no scripts yet: add them in Settings → Scripts)", None, enabled=False)
+        for s in scripts:
+            yield pystray.MenuItem(s.name, run(s.name))
 
     def set_state(self, state: str) -> None:
         self.icon.icon = self._images.get(state, self._images["idle"])

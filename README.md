@@ -155,6 +155,34 @@ undo (deleting, buying, sending a message, signing out, changing security settin
 than doing it. This errs on the cautious side, e.g. it won't even draft a message to someone. Untick
 "…but still refuse irreversible actions" to allow them; then nothing asks you before deleting, buying or sending.
 
+### Scripts
+
+For running the same tasks every time, such as testing an app or a routine, save them as a **script** in
+Settings → **Scripts**. Write it in plain words, one task per line or as a numbered list:
+
+```
+1. Open Notepad and type "Hello from Jev"
+2. Make sure the title shows it's unsaved
+3. Press ctrl+s, wait a couple of seconds, then check a Save As dialog appears
+4. Press escape
+```
+
+- **Breaking it into steps:** the AI planner breaks the script into simple steps Jev understands (preview them
+  with **Break into steps**). "Check / verify / make sure …" lines become checks, and "wait …" becomes a pause.
+  The breakdown is saved with the script and reused until you edit it, so every run follows exactly the same
+  steps. Without an AI planner, each line is a step.
+- **Starting it:** say "run the notepad test", or use tray icon → **Run script**, or **Run now** in Settings.
+- **Order:** steps run strictly in order through the normal stages. If a step can't be done, the AI works out
+  how to do *that step*, and the rest of the script carries on after it.
+- **Checks** are judged by Jev against the screen (strictly: 70% or more to pass), waiting a few seconds first
+  if the screen is still changing.
+- **Options per script:** **Run unattended** (on by default) decides everything itself, like YOLO mode,
+  including the same irreversible-action safety check. **Stop at the first failed step or check** is also on by
+  default; turn it off to record failures and carry on.
+- **Reports:** at the end, the indicator shows the result (e.g. "all 7 steps done, checks 2/2 passed" or "failed
+  at step 6 of 7"). A report with every step, what was done and each check's result is saved to
+  `%APPDATA%\JevHarness\logs\scripts`, as JSON and readable text.
+
 ### The indicator
 
 A small dot above the taskbar while idle. It shows a pill with progress while you speak and while it works, and
@@ -175,6 +203,7 @@ Right-click the tray icon → **Settings**.
 |---|---|
 | **Jev** | TypeSafe API key and model, the confidence thresholds for acting, dry run, YOLO mode (and whether it still refuses irreversible actions) |
 | **AI planner** | Provider (off, OpenRouter, Ollama), model (**Load list** shows what's available), key or server URL, when to use it (only when Jev is confused, or for every command), whether to send a screenshot (needs a vision model), and for Ollama whether to keep the model loaded in memory. Choosing a different Ollama model and pressing **Test** or **Save** unloads the previous one and loads the new one. The **vision model** (the planner's by default) finds icons and images on the screenshot; it has to point accurately, which **Test connections** checks (e.g. `qwen3.8` can; `gemma4` describes screens well but can't). |
+| **Scripts** | Saved scripts: write, name and delete them, set their options, preview the steps (**Break into steps**) and **Run now** |
 | **PC search** | Search with PowerToys instead of the Start menu, and its shortcut (default `left alt+space`; **Record** captures a new one, **Detect** reads it from PowerToys) |
 | **Indicator** | Background and text colour, opacity, the dot colour for each state, and its position (presets, **Drag…** to place it anywhere, or **Reset position**). Changes preview live. |
 
@@ -233,6 +262,7 @@ if you used `-Startup`) and `%APPDATA%\JevHarness`. The API keys are under **Jev
 | `search.py` | Searching the PC: PowerToys via its shortcut, or the Start menu |
 | `overlay.py` | The status indicator (with its ✓ button) and the highlight around the element being acted on |
 | `tray.py`, `settings_dialog.py` | The tray icon and Settings window |
+| `scripts.py` | Saved scripts: storage, splitting into steps without an AI, check/wait steps, run reports |
 | `journal.py` | The run journal: each action, what it changed and whether it worked, for the AI's context |
 | `settings.py` | Settings file and API keys |
 

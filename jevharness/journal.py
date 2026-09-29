@@ -84,4 +84,6 @@ class Journal:
                 lines.append(f'{n}. asked "{e["question"][:80]}" → {e["answer"]}')
             elif kind == "check":
                 lines.append(f'{n}. checked whether the whole request is done: {e["p"]:.0%}')
+            elif kind == "verify":
+                lines.append(f'{n}. check "{e["condition"][:80]}": {"passed" if e["passed"] else "FAILED"} ({e["p"]:.0%})')
         return lines

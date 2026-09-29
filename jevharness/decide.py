@@ -245,6 +245,33 @@ class Decider:
         ans = r.answers["steps"]
         return options[int(ans.choice[1:])], {criteria[k]: v for k, v in _top(ans, 3).items()}
 
+    def check(self, condition: str, screen: Screen) -> float:
+        """Probability that `condition` holds on the screen now (a script's "check: …" step)."""
+        r = self.client.system_one(
+            {"condition": condition, "active_window": screen.window_title,
+             "screen_elements": [e.text[:120] for e in screen.elements][:MAX_TARGETS]},
+            {"holds": Noul(instructions=(
+                "Judging by what is on screen now (`active_window` and the text in `screen_elements`), is `condition` true?"
+            ))},
+        )
+        return r.answers["holds"].noul
+
+    def pick_script(self, command: str, names: list[str]) -> tuple[int | None, float]:
+        """Which saved script `command` asks to run, if any: (index or None, probability)."""
+        criteria = {f"s{i}": f'The script called "{n}"' for i, n in enumerate(names)}
+        criteria["none"] = "Not a request to run a saved script"
+        r = self.client.system_one(
+            {"command": command, "saved_scripts": names},
+            {"script": Choice(
+                instructions=("Does `command` ask to run (start, play, do) one of the user's saved scripts listed in "
+                              "`saved_scripts`? Which one? Choose none for any other kind of request."),
+                criteria=criteria,
+            )},
+        )
+        a = r.answers["script"]
+        p = a.probabilities[a.choice]
+        return (None if a.choice == "none" else int(a.choice[1:])), p
+
     def option_fits(self, request: str, question: str, option: str) -> float:
         """Probability that `option` is a sensible answer to `question` for carrying out `request`
         (YOLO mode checks this before taking the top option without asking)."""

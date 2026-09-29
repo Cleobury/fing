@@ -12,6 +12,7 @@ from . import search
 from .decide import Decider
 from .llm import PROVIDERS, Planner
 from .overlay import DEFAULT_BG, DEFAULT_DOTS, DEFAULT_FG
+from .scripts import Script, breakdown_key, load_scripts, save_scripts, split_lines
 from .settings import get_api_key, set_api_key
 
 _PROVIDER_LABELS = {"off": "Off", "openrouter": "OpenRouter", "ollama": "Ollama (local)"}
@@ -67,6 +68,7 @@ class SettingsDialog:
         self._build_jev_tab(tabs, s)
         self._build_planner_tab(tabs, s)
         self._build_search_tab(tabs, s)
+        self._build_scripts_tab(tabs)
         self._build_indicator_tab(tabs, s)
 
         self.status = tk.StringVar(value="Keys are stored in Windows Credential Manager.")
@@ -303,6 +305,176 @@ class SettingsDialog:
         self.hotkey.set(combo)
         self.status.set(f"Shortcut set to {combo}.")
 
+    # ---- Scripts ------------------------------------------------------------------------
+
+    def _build_scripts_tab(self, tabs) -> None:
+        f = self._tab(tabs, "Scripts")
+        ttk.Label(f, text="Saved lists of tasks, run the same way every time (app testing, routines). Start one by saying "
+                          "“run the <name> script”, or from the tray menu. Write steps in plain words; lines like "
+                          "“check that …” are verified and reported, “wait 3 seconds” pauses.",
+                  foreground="#5f6368", wraplength=520, justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
+        self.scripts = load_scripts()
+        self._script_idx: int | None = None
+
+        left = ttk.Frame(f)
+        left.grid(row=1, column=0, sticky="nsw", pady=(10, 0), padx=(0, 12))
+        self.script_list = tk.Listbox(left, height=14, width=22, exportselection=False)
+        self.script_list.pack(fill="y", expand=True)
+        self.script_list.bind("<<ListboxSelect>>", lambda _: self._select_script())
+        lb = ttk.Frame(left)
+        lb.pack(fill="x", pady=(6, 0))
+        ttk.Button(lb, text="New", width=8, command=self._new_script).pack(side="left")
+        ttk.Button(lb, text="Delete", width=8, command=self._delete_script).pack(side="left", padx=(4, 0))
+
+        right = ttk.Frame(f)
+        right.grid(row=1, column=1, sticky="nsew", pady=(10, 0))
+        ttk.Label(right, text="Name").grid(row=0, column=0, sticky="w")
+        self.script_name = tk.StringVar()
+        self.script_name_entry = ttk.Entry(right, textvariable=self.script_name, width=40)
+        self.script_name_entry.grid(row=0, column=1, sticky="we")
+        self.script_text = tk.Text(right, height=9, width=52, wrap="word", font=("Segoe UI", 10), undo=True)
+        self.script_text.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(6, 0))
+        self.script_unattended = tk.BooleanVar(value=True)
+        self.script_stop = tk.BooleanVar(value=True)
+        ttk.Checkbutton(right, text="Run unattended (decide everything itself, like YOLO mode)",
+                        variable=self.script_unattended).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(right, text="Stop at the first failed step or check", variable=self.script_stop).grid(
+            row=3, column=0, columnspan=2, sticky="w")
+        rb = ttk.Frame(right)
+        rb.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.break_btn = ttk.Button(rb, text="Break into steps", command=self._break_script)
+        self.break_btn.pack(side="left")
+        ttk.Button(rb, text="Run now", command=self._run_script_now).pack(side="left", padx=(6, 0))
+        ttk.Label(right, text="Steps it will follow", font=("Segoe UI", 9, "bold")).grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        self.steps_preview = tk.Text(right, height=7, width=52, wrap="word", font=("Segoe UI", 9), foreground="#3c4043",
+                                     background="#f8f9fa", relief="flat", state="disabled")
+        self.steps_preview.grid(row=6, column=0, columnspan=2, sticky="nsew")
+        self._refresh_script_list(select=0 if self.scripts else None)
+
+    def _refresh_script_list(self, select: int | None = None) -> None:
+        self.script_list.delete(0, "end")
+        for s in self.scripts:
+            self.script_list.insert("end", s.name)
+        self._script_idx = None
+        if select is not None and self.scripts:
+            self.script_list.selection_set(select)
+            self._select_script()
+        else:
+            self._load_script_fields(None)
+
+    def _load_script_fields(self, script: Script | None) -> None:
+        state = ["!disabled"] if script else ["disabled"]
+        self.script_name_entry.state(state)
+        self.script_name.set(script.name if script else "")
+        self.script_text.configure(state="normal")
+        self.script_text.delete("1.0", "end")
+        if script:
+            self.script_text.insert("1.0", script.text)
+        else:
+            self.script_text.configure(state="disabled")
+        self.script_unattended.set(script.unattended if script else True)
+        self.script_stop.set(script.stop_on_failure if script else True)
+        self._show_steps(script)
+
+    def _store_script(self) -> None:
+        """Copy the edit fields back into the selected script."""
+        if self._script_idx is None or self._script_idx >= len(self.scripts):
+            return
+        s = self.scripts[self._script_idx]
+        name = self.script_name.get().strip() or s.name
+        taken = {o.name for i, o in enumerate(self.scripts) if i != self._script_idx}
+        base, n = name, 2
+        while name in taken:
+            name, n = f"{base} ({n})", n + 1
+        s.name = name
+        s.text = self.script_text.get("1.0", "end").strip()
+        s.unattended, s.stop_on_failure = self.script_unattended.get(), self.script_stop.get()
+        self.script_list.delete(self._script_idx)
+        self.script_list.insert(self._script_idx, s.name)
+        self.script_list.selection_set(self._script_idx)
+
+    def _select_script(self) -> None:
+        sel = self.script_list.curselection()
+        if not sel or sel[0] == self._script_idx:
+            return
+        self._store_script()
+        self._script_idx = sel[0]
+        self._load_script_fields(self.scripts[self._script_idx])
+
+    def _new_script(self) -> None:
+        self._store_script()
+        names = {s.name for s in self.scripts}
+        n = len(self.scripts) + 1
+        while f"Script {n}" in names:
+            n += 1
+        self.scripts.append(Script(f"Script {n}"))
+        self._refresh_script_list(select=len(self.scripts) - 1)
+        self.script_name_entry.focus_set()
+        self.script_name_entry.select_range(0, "end")
+
+    def _delete_script(self) -> None:
+        if self._script_idx is None:
+            return
+        del self.scripts[self._script_idx]
+        self._refresh_script_list(select=min(self._script_idx, len(self.scripts) - 1) if self.scripts else None)
+
+    def _show_steps(self, script: Script | None) -> None:
+        planner = self._planner()
+        if script is None:
+            text = ""
+        elif planner is None:
+            text = "\n".join(f"{i}. {s}" for i, s in enumerate(split_lines(script.text), 1)) or "(empty)"
+            text += "\n\n(No AI planner: each line is a step.)" if script.text else ""
+        elif script.steps and script.steps_key == breakdown_key(script.text, planner.model):
+            text = "\n".join(f"{i}. {s}" for i, s in enumerate(script.steps, 1))
+        else:
+            text = "(Not broken into steps yet: press Break into steps, or it happens on the first run.)"
+        self.steps_preview.configure(state="normal")
+        self.steps_preview.delete("1.0", "end")
+        self.steps_preview.insert("1.0", text)
+        self.steps_preview.configure(state="disabled")
+
+    def _break_script(self) -> None:
+        self._store_script()
+        if self._script_idx is None:
+            return
+        script = self.scripts[self._script_idx]
+        planner = self._planner()
+        if planner is None:
+            self._show_steps(script)
+            return
+        self.status.set(f"Breaking “{script.name}” into steps with {planner.model}…")
+        self.break_btn.state(["disabled"])
+
+        def run():
+            try:
+                steps, msg = planner.break_script(script.name, script.text), None
+            except Exception as e:
+                steps, msg = None, f"Couldn't break it into steps: {str(e)[:120]}"
+            self.app.ui(self._script_broken, script, planner.model, steps, msg)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _script_broken(self, script: Script, model: str, steps: list[str] | None, msg: str | None) -> None:
+        if not self.win.winfo_exists():
+            return
+        self.break_btn.state(["!disabled"])
+        if steps:
+            script.steps, script.steps_key = steps, breakdown_key(script.text, model)
+            msg = f"{len(steps)} steps. They'll be followed exactly on every run until you edit the script (Save to keep them)."
+        self.status.set(msg or "The AI returned no steps.")
+        if self._script_idx is not None and self.scripts[self._script_idx] is script:
+            self._show_steps(script)
+
+    def _run_script_now(self) -> None:
+        self._store_script()
+        if self._script_idx is None:
+            return
+        name = self.scripts[self._script_idx].name
+        self.save()  # keeps the scripts (and any other changes) and closes the window
+        if self.app.settings_dialog is None:
+            self.app.run_script(name)
+
     # ---- Indicator ----------------------------------------------------------------------
 
     def _build_indicator_tab(self, tabs, s) -> None:
@@ -499,6 +671,8 @@ class SettingsDialog:
         s.overlay_dots = self._changed_dots()
         s.overlay_position = self._position_id()
         s.overlay_x, s.overlay_y = self.custom_xy
+        self._store_script()
+        save_scripts(self.scripts)
         s.save()
         set_api_key(self.key.get().strip())
         if PROVIDERS.get(pid, {}).get("needs_key"):
