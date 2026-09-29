@@ -8,7 +8,7 @@ from tkinter import colorchooser, ttk
 import keyboard
 from typesafe_sdk import TypeSafeAPIError, TypeSafeAuthenticationError, TypeSafeError
 
-from . import search
+from . import autostart, search
 from .decide import Decider
 from .llm import PROVIDERS, Planner
 from .overlay import DEFAULT_BG, DEFAULT_DOTS, DEFAULT_FG
@@ -124,6 +124,9 @@ class SettingsDialog:
             f, text="…but still refuse irreversible actions (delete, buy, send, sign out…)", variable=self.yolo_irreversible)
         self.yolo_safety_check.grid(row=7, column=0, columnspan=3, sticky="w", padx=(22, 0), pady=(4, 0))
         self._yolo_changed()
+        self.autostart = tk.BooleanVar(value=autostart.is_enabled())
+        ttk.Checkbutton(f, text="Start with Windows (when I sign in)", variable=self.autostart).grid(
+            row=8, column=0, columnspan=3, sticky="w", pady=(12, 0))
 
     def _yolo_changed(self) -> None:
         self.yolo_safety_check.state(["!disabled"] if self.yolo.get() else ["disabled"])
@@ -673,6 +676,12 @@ class SettingsDialog:
         s.overlay_x, s.overlay_y = self.custom_xy
         self._store_script()
         save_scripts(self.scripts)
+        if self.autostart.get() != autostart.is_enabled():
+            try:
+                autostart.set_enabled(self.autostart.get())
+            except Exception as e:
+                self.status.set(f"Couldn't change Start with Windows: {str(e)[:100]}")
+                return
         s.save()
         set_api_key(self.key.get().strip())
         if PROVIDERS.get(pid, {}).get("needs_key"):

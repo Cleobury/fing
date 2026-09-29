@@ -94,7 +94,7 @@ back to stage 2 with your answer, and the AI works out new steps.
 In PowerShell, from the project folder:
 
 ```powershell
-.\setup.ps1            # add -Startup to also launch it when you sign in
+.\setup.ps1            # add -Startup to also launch it when you sign in (or tick Start with Windows later)
 ```
 
 This creates `.venv`, installs `requirements.txt` and adds a **Jev Harness** shortcut to the Start menu (and
@@ -201,7 +201,7 @@ Right-click the tray icon → **Settings**.
 
 | Tab | What's there |
 |---|---|
-| **Jev** | TypeSafe API key and model, the confidence thresholds for acting, dry run, YOLO mode (and whether it still refuses irreversible actions) |
+| **Jev** | TypeSafe API key and model, the confidence thresholds for acting, dry run, YOLO mode (and whether it still refuses irreversible actions), and **Start with Windows** (also in the tray menu) |
 | **AI planner** | Provider (off, OpenRouter, Ollama), model (**Load list** shows what's available), key or server URL, when to use it (only when Jev is confused, or for every command), whether to send a screenshot (needs a vision model), and for Ollama whether to keep the model loaded in memory. Choosing a different Ollama model and pressing **Test** or **Save** unloads the previous one and loads the new one. The **vision model** (the planner's by default) finds icons and images on the screenshot; it has to point accurately, which **Test connections** checks (e.g. `qwen3.8` can; `gemma4` describes screens well but can't). |
 | **Scripts** | Saved scripts: write, name and delete them, set their options, preview the steps (**Break into steps**) and **Run now** |
 | **PC search** | Search with PowerToys instead of the Start menu, and its shortcut (default `left alt+space`; **Record** captures a new one, **Detect** reads it from PowerToys) |
@@ -262,6 +262,7 @@ if you used `-Startup`) and `%APPDATA%\JevHarness`. The API keys are under **Jev
 | `search.py` | Searching the PC: PowerToys via its shortcut, or the Start menu |
 | `overlay.py` | The status indicator (with its ✓ button) and the highlight around the element being acted on |
 | `tray.py`, `settings_dialog.py` | The tray icon and Settings window |
+| `autostart.py` | Start with Windows: the shortcut in the Startup folder |
 | `scripts.py` | Saved scripts: storage, splitting into steps without an AI, check/wait steps, run reports |
 | `journal.py` | The run journal: each action, what it changed and whether it worked, for the AI's context |
 | `settings.py` | Settings file and API keys |

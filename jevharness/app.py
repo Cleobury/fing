@@ -29,7 +29,7 @@ import keyboard
 import numpy as np
 from typesafe_sdk import TypeSafeAPIError, TypeSafeAuthenticationError, TypeSafeError
 
-from . import executor
+from . import autostart, executor
 from .apps import App as InstalledApp
 from .apps import load_start_apps
 from .decide import (
@@ -389,6 +389,17 @@ class App:
             self.settings_dialog.win.focus_force()
         else:
             self.settings_dialog = SettingsDialog(self)
+
+    def toggle_autostart(self) -> None:
+        on = not autostart.is_enabled()
+        try:
+            autostart.set_enabled(on)
+        except Exception as e:
+            log.exception("Couldn't change Start with Windows")
+            self.status("error", f"Couldn't change Start with Windows: {str(e)[:60]}", 4000)
+            return
+        self.tray.refresh()
+        self.overlay.show(self.overlay.idle_state, "Starts with Windows" if on else "Won't start with Windows", 2000)
 
     def toggle_yolo(self) -> None:
         self.settings.yolo = not self.settings.yolo

@@ -6,6 +6,7 @@ import threading
 import pystray
 from PIL import Image, ImageDraw, ImageFont
 
+from . import autostart
 from .scripts import load_scripts
 from .settings import LOG_DIR
 
@@ -41,6 +42,8 @@ class Tray:
                 pystray.MenuItem("YOLO mode (decide everything itself)", lambda: app.ui(app.toggle_yolo),
                                  checked=lambda _: app.settings.yolo),
                 pystray.MenuItem("Run script", pystray.Menu(lambda: self._script_items())),
+                pystray.MenuItem("Start with Windows", lambda: app.ui(app.toggle_autostart),
+                                 checked=lambda _: autostart.is_enabled()),
                 pystray.MenuItem("Move indicator", lambda: app.ui(app.move_overlay)),
                 pystray.MenuItem("Reset indicator position", lambda: app.ui(app.reset_overlay_position)),
                 pystray.MenuItem("Open logs folder", lambda: os.startfile(LOG_DIR)),
