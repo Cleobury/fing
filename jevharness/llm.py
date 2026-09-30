@@ -513,7 +513,8 @@ class Planner:
             if r.status_code == 400:
                 body.pop("response_format")
                 r = self.http.post(f"{self.base_url}/chat/completions", json=body)
-        r.raise_for_status()
+        if r.status_code >= 400:
+            raise RuntimeError(f"{r.status_code}: {_api_error(r)}")
         reply = r.json()
         if self.model == OPENROUTER_AUTO:
             log.info("Auto Router picked %s", reply.get("model"))
@@ -567,3 +568,15 @@ class Planner:
         usable = [m for m in models if "structured_outputs" in (m.get("supported_parameters") or [])]
         # The Auto Router first, so "let OpenRouter choose" is always on offer (it may not list structured output itself).
         return [OPENROUTER_AUTO, *sorted(m["id"] for m in usable if m["id"] != OPENROUTER_AUTO)]
+
+
+def _api_error(r: httpx.Response) -> str:
+    """The reason an OpenAI-compatible API gave for rejecting a request, e.g. OpenRouter's {"error": {"message": …}}."""
+    try:
+        err = r.json().get("error")
+    except ValueError:
+        return r.text[:300]
+    if isinstance(err, dict):
+        raw = (err.get("metadata") or {}).get("raw")
+        return str(err.get("message") or err) + (f" ({str(raw)[:200]})" if raw else "")
+    return str(err or r.text[:300])
