@@ -493,6 +493,7 @@ class Planner:
             "messages": [{"role": "system", "content": SCRIPT_SYSTEM},
                          {"role": "user", "content": json.dumps({"script_name": name, "script": text}, ensure_ascii=False)}],
             "temperature": 0.0,
+            "max_tokens": 4096,  # a long script can break into many steps
             "response_format": {"type": "json_schema", "json_schema": {"name": "plan", "strict": True, "schema": SCHEMA}},
         }
         if self.provider == "openrouter":
@@ -503,6 +504,10 @@ class Planner:
     def _chat(self, body: dict, schema: dict = SCHEMA) -> dict:
         if self.keep_alive:
             return self._ollama_chat(body, schema)
+        if self.provider == "openrouter":
+            # Replies are small JSON. Without a cap OpenRouter reserves the model's whole output limit against the
+            # balance (e.g. 65536 tokens for Sonnet), and a low balance then fails with 402.
+            body.setdefault("max_tokens", 2048)
         r = self.http.post(f"{self.base_url}/chat/completions", json=body)
         if r.status_code == 400 and "response_format" in body:
             # Local/older models may reject JSON-schema mode: fall back to plain JSON mode, then prompt-only.
