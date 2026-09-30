@@ -206,6 +206,8 @@ class SettingsDialog:
             self.llm_url.set("")
             self.llm_model.set(info["model"])
             self.model_box.configure(values=[])
+            self.vision_model.set(_SAME_AS_PLANNER)  # a model name from the old provider won't exist on this one
+            self.vision_box.configure(values=[_SAME_AS_PLANNER])
             if pid == "ollama":
                 self.load_models()
         if on and not self.llm_url.get() and not initial:
