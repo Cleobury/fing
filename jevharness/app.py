@@ -183,6 +183,7 @@ class App:
         self.recorder: Recorder | None = None
         self.model_ready = False
         self.recording = False
+        self._record_t = 0.0
         self.busy = False
         self._ocr_future: Future | None = None
         self._cancel = threading.Event()
@@ -461,6 +462,7 @@ class App:
             self.status("error", "No TypeSafe API key: right-click the tray icon → Settings", 4000)
             return
         self.recording = True
+        self._record_t = time.perf_counter()
         self.recorder.start()
         if self._question is None:
             # OCR runs while the user is still speaking, so it's ready by the time they let go.
@@ -471,6 +473,10 @@ class App:
         self.recording = False
         audio = self.recorder.stop()
         if len(audio) < MIN_AUDIO_S * SAMPLE_RATE:
+            if self._question is None and time.perf_counter() - self._record_t >= MIN_AUDIO_S + 0.5:
+                # Held long enough to be a command, but the mic gave nothing (e.g. just after waking from sleep).
+                self.status("warn", "No sound from the microphone; reconnecting, try again", 3000)
+                return
             self._show_waiting()
             return
         if self._question is not None:
