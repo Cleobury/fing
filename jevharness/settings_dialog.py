@@ -1,5 +1,6 @@
 """The Settings window opened from the tray menu."""
 
+import logging
 import threading
 import tkinter as tk
 from dataclasses import replace
@@ -15,8 +16,11 @@ from .overlay import DEFAULT_BG, DEFAULT_DOTS, DEFAULT_FG
 from .scripts import Script, breakdown_key, load_scripts, save_scripts, split_lines
 from .settings import get_api_key, set_api_key
 
+log = logging.getLogger(__name__)
+
 _PROVIDER_LABELS = {"off": "Off", "openrouter": "OpenRouter", "ollama": "Ollama (local)"}
 _SAME_AS_PLANNER = "Same as the planner"
+_SYSTEM_DEFAULT_MIC = "System default"
 _MODE_LABELS = {"confused": "Only when Jev is confused", "always": "Always (rewrite every command first)"}
 _POSITION_LABELS = {
     "bottom-centre": "Bottom centre (above taskbar)",
@@ -127,6 +131,23 @@ class SettingsDialog:
         self.autostart = tk.BooleanVar(value=autostart.is_enabled())
         ttk.Checkbutton(f, text="Start with Windows (when I sign in)", variable=self.autostart).grid(
             row=8, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        self.mic = tk.StringVar(value=s.mic_device or _SYSTEM_DEFAULT_MIC)
+        _row(f, 9, "Microphone")
+        ttk.Combobox(f, textvariable=self.mic, values=self._mic_choices(s.mic_device), state="readonly", width=44).grid(
+            row=9, column=1, columnspan=2, sticky="we", pady=(12, 0))
+
+    def _mic_choices(self, saved: str) -> list[str]:
+        names = []
+        # Importing .audio initialises COM, which must wait until Whisper has loaded (see app._load_model).
+        if self.app.recorder:
+            from .audio import input_devices
+            try:
+                names = input_devices()
+            except Exception:
+                log.exception("Could not list microphones")
+        if saved and saved not in names:
+            names.append(saved)  # unplugged, or not loaded yet: keep it pickable
+        return [_SYSTEM_DEFAULT_MIC, *names]
 
     def _yolo_changed(self) -> None:
         self.yolo_safety_check.state(["!disabled"] if self.yolo.get() else ["disabled"])
@@ -655,6 +676,7 @@ class SettingsDialog:
         s = self.app.settings
         s.model = self.model.get().strip() or "jev-latest"
         s.dry_run = self.dry_run.get()
+        s.mic_device = "" if self.mic.get() == _SYSTEM_DEFAULT_MIC else self.mic.get()
         s.yolo = self.yolo.get()
         s.yolo_allow_irreversible = not self.yolo_irreversible.get()
         s.min_action_prob = min(1.0, max(0.0, min_action))

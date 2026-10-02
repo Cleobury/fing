@@ -297,7 +297,7 @@ class App:
             from .perception import Perception
 
             self.perception = Perception()
-            self.recorder = Recorder()
+            self.recorder = Recorder(self.settings.mic_device)
             self.model_ready = True
             log.info("Ready (whisper on %s)", self.transcriber.device)
         except Exception as e:
@@ -379,6 +379,8 @@ class App:
 
     def on_settings_changed(self) -> None:
         self.apply_overlay_style()
+        if self.recorder:
+            self.recorder.set_device(self.settings.mic_device)
         self._rebuild_decider()
         # Serve the chosen local model now (unloading the previous one), or unload it if Ollama's no longer used.
         self.serve_model_in_background(self.planner, announce=True)

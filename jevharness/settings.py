@@ -32,6 +32,7 @@ class Settings:
     min_target_prob: float = 0.4
     whisper_model: str = "large-v3-turbo"
     language: str = "en"
+    mic_device: str = ""  # input device name; blank = the Windows default microphone
     # AI planner used when Jev is confused: "off", "openrouter" or "ollama".
     llm_provider: str = "off"
     llm_model: str = "google/gemini-3.8-flash"
