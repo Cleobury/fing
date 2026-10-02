@@ -26,6 +26,8 @@ PROVIDERS = {
     "openrouter": {"base_url": "https://openrouter.ai/api/v1", "model": "google/gemini-3.8-flash", "needs_key": True},
     "ollama": {"base_url": "http://localhost:11434/v1", "model": "", "needs_key": False},
 }
+# OpenRouter's Auto Router: it picks a model per request (standard price of whichever model it picks, no extra fee).
+OPENROUTER_AUTO = "openrouter/auto"
 
 SYSTEM = """You help a voice-controlled computer assistant. A fast executor carries out one simple step at a time: it reads the
 text visible on screen (OCR) and matches each step to it. It gets confused by casual speech, implied steps, or requests
@@ -491,6 +493,7 @@ class Planner:
             "messages": [{"role": "system", "content": SCRIPT_SYSTEM},
                          {"role": "user", "content": json.dumps({"script_name": name, "script": text}, ensure_ascii=False)}],
             "temperature": 0.0,
+            "max_tokens": 4096,  # a long script can break into many steps
             "response_format": {"type": "json_schema", "json_schema": {"name": "plan", "strict": True, "schema": SCHEMA}},
         }
         if self.provider == "openrouter":
@@ -501,6 +504,10 @@ class Planner:
     def _chat(self, body: dict, schema: dict = SCHEMA) -> dict:
         if self.keep_alive:
             return self._ollama_chat(body, schema)
+        if self.provider == "openrouter":
+            # Replies are small JSON. Without a cap OpenRouter reserves the model's whole output limit against the
+            # balance (e.g. 65536 tokens for Sonnet), and a low balance then fails with 402.
+            body.setdefault("max_tokens", 2048)
         r = self.http.post(f"{self.base_url}/chat/completions", json=body)
         if r.status_code == 400 and "response_format" in body:
             # Local/older models may reject JSON-schema mode: fall back to plain JSON mode, then prompt-only.
@@ -511,8 +518,12 @@ class Planner:
             if r.status_code == 400:
                 body.pop("response_format")
                 r = self.http.post(f"{self.base_url}/chat/completions", json=body)
-        r.raise_for_status()
-        return _parse_json(r.json()["choices"][0]["message"]["content"])
+        if r.status_code >= 400:
+            raise RuntimeError(f"{r.status_code}: {_api_error(r)}")
+        reply = r.json()
+        if self.model == OPENROUTER_AUTO:
+            log.info("Auto Router picked %s", reply.get("model"))
+        return _parse_json(reply["choices"][0]["message"]["content"])
 
     def _ollama_chat(self, body: dict, schema: dict = SCHEMA) -> dict:
         """The same request through Ollama's native /api/chat, which honours keep_alive."""
@@ -560,4 +571,17 @@ class Planner:
         r.raise_for_status()
         models = r.json()["data"]
         usable = [m for m in models if "structured_outputs" in (m.get("supported_parameters") or [])]
-        return sorted(m["id"] for m in usable)
+        # The Auto Router first, so "let OpenRouter choose" is always on offer (it may not list structured output itself).
+        return [OPENROUTER_AUTO, *sorted(m["id"] for m in usable if m["id"] != OPENROUTER_AUTO)]
+
+
+def _api_error(r: httpx.Response) -> str:
+    """The reason an OpenAI-compatible API gave for rejecting a request, e.g. OpenRouter's {"error": {"message": …}}."""
+    try:
+        err = r.json().get("error")
+    except ValueError:
+        return r.text[:300]
+    if isinstance(err, dict):
+        raw = (err.get("metadata") or {}).get("raw")
+        return str(err.get("message") or err) + (f" ({str(raw)[:200]})" if raw else "")
+    return str(err or r.text[:300])
