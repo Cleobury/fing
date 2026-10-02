@@ -121,6 +121,7 @@ It runs without a console window. To see its log output while debugging, run it 
 | Click **✓** on the indicator while it's working | Tells it the task is done, so it stops (shown as **Done ✓**) |
 | Tray icon → **Dry run** | Highlights what it would do, without doing it |
 | Tray icon → **YOLO mode** | Decides everything itself instead of asking (see below) |
+| Hold the button on your **phone** | Same as holding Right Ctrl, using the phone's microphone (see below) |
 
 Things you can say:
 
@@ -137,6 +138,23 @@ Things you can say:
   PowerToys if enabled; Jev then picks the matching result.
 
 - **Window commands:** "minimise this window", "maximise it", "snap it to the left"
+
+### Phone remote
+
+Talk to Jev from your phone over your Wi-Fi: a web page with one big hold-to-talk button.
+
+1. Settings → **Phone**: tick **Let my phone control Jev on this network**, then **Save**.
+2. Scan the QR code with the phone's camera. It opens the page and pairs it with the PIN, so you only do this once
+   (or open the address shown and type the PIN).
+3. The first time, the phone warns that the connection isn't private: the PC makes its own certificate, because
+   browsers only allow the microphone over HTTPS. Choose **Advanced → Proceed** (Chrome) or **Show Details → visit
+   this website** (Safari). If Windows asks, allow Jev Harness on **private** networks.
+
+Hold the button, speak, let go. The page shows what Jev is doing, lets you tap an option when it asks a
+question, and a tap while it's working stops it. Tip: add the page to your home screen.
+
+Anyone on your network with the PIN can control the PC. **New PIN** signs every phone out, and after 10 wrong
+PINs the remote refuses everyone for 5 minutes.
 
 ### YOLO mode
 
@@ -204,12 +222,14 @@ Right-click the tray icon → **Settings**.
 | **Jev** | TypeSafe API key and model, the confidence thresholds for acting, dry run, YOLO mode (and whether it still refuses irreversible actions), and **Start with Windows** (also in the tray menu) |
 | **AI planner** | Provider (off, OpenRouter, Ollama), model (**Load list** shows what's available; with OpenRouter, `openrouter/auto` at the top lets OpenRouter's Auto Router pick a model for each request, at that model's normal price), key or server URL, when to use it (only when Jev is confused, or for every command), whether to send a screenshot (needs a vision model), and for Ollama whether to keep the model loaded in memory. Choosing a different Ollama model and pressing **Test** or **Save** unloads the previous one and loads the new one. The **vision model** (the planner's by default) finds icons and images on the screenshot; it has to point accurately, which **Test connections** checks (e.g. `qwen3.8` can; `gemma4` describes screens well but can't). |
 | **Scripts** | Saved scripts: write, name and delete them, set their options, preview the steps (**Break into steps**) and **Run now** |
+| **Phone** | The phone remote: on or off, its address, QR code and PIN (**New PIN** signs phones out), and port (default 8765) |
 | **PC search** | Search with PowerToys instead of the Start menu, and its shortcut (default `left alt+space`; **Record** captures a new one, **Detect** reads it from PowerToys) |
 | **Indicator** | Background and text colour, opacity, the dot colour for each state, and its position (presets, **Drag…** to place it anywhere, or **Reset position**). Changes preview live. |
 
 ## Privacy
 
-- **Your voice never leaves your PC.** Whisper runs locally.
+- **Your voice never leaves your PC.** Whisper runs locally. With the phone remote, the phone sends the
+  recording straight to the PC over your network (HTTPS).
 - **Sent to TypeSafe for each decision:** your transcribed command, the active window's title and the text
   OCR read on screen. No screenshots are sent.
 - **Sent to the AI planner, only when it's used:** the same text with each item's position on screen, plus a
@@ -236,6 +256,8 @@ Logs, including every decision Jev made and its probabilities, are in `%APPDATA%
 
 | Problem | Try |
 |---|---|
+| The phone page can't reach the PC | Both must be on the same network. Allow Jev Harness (Python) on private networks in Windows Defender Firewall, and check the address in Settings → Phone. |
+| The phone page says to open it with https:// | Use the address from Settings → Phone, which starts with `https://` |
 | "CUDA unavailable: transcribing on CPU" | Update the NVIDIA driver. The CUDA libraries themselves come from `requirements.txt`. |
 | "Windows OCR is unavailable" | Add a language with OCR support: Settings → Time & language → Language & region |
 | Nothing happens on Right Ctrl | Check the tray icon is there; the focused app may be running as administrator |
@@ -258,6 +280,7 @@ if you used `-Startup`) and `%APPDATA%\JevHarness`. The API keys are under **Jev
 | `desktop.py` | Win32: foreground and open app windows, switching to a window, fullscreen detection, waiting for the screen to settle |
 | `executor.py` | Mouse (clicks, drags, scrolling), keyboard, launching and switching apps, PC search |
 | `stt.py`, `audio.py` | Whisper on CUDA; microphone capture with a short pre-roll |
+| `remote.py`, `web/index.html` | Phone remote: HTTPS server on the local network (self-signed certificate, PIN) and the hold-to-talk page |
 | `apps.py` | Installed Start-menu apps, for "open <app>" |
 | `search.py` | Searching the PC: PowerToys via its shortcut, or the Start menu |
 | `overlay.py` | The status indicator (with its ✓ button) and the highlight around the element being acted on |

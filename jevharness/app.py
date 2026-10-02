@@ -54,6 +54,7 @@ from .llm import PROVIDERS, Planner
 from .search import valid_hotkey
 from .overlay import Highlight, Overlay
 from .settings import LOG_DIR, Settings, get_api_key
+from .remote import RemoteServer
 from .settings_dialog import SettingsDialog
 from .stt import Transcriber
 from .tray import Tray
@@ -71,6 +72,7 @@ log = logging.getLogger(__name__)
 HOTKEY = "right ctrl"
 ICON_PATH = os.path.join(os.path.dirname(__file__), "icon.ico")
 MIN_AUDIO_S = 0.35  # shorter presses are treated as taps and ignored
+PHONE_TIMEOUT_S = 75  # a phone recording that never ended (the longest clip is 60 s) stops blocking Right Ctrl
 MIN_RMS = 0.002  # below this the clip is silence
 HINT_WORDS = 40
 RECENT_S = 120  # how long earlier actions count as context for a new command
@@ -183,6 +185,7 @@ class App:
         self.recorder: Recorder | None = None
         self.model_ready = False
         self.recording = False
+        self._phone_recording = False  # the current recording is coming from the phone remote, not the mic
         self._record_t = 0.0
         self.busy = False
         self._ocr_future: Future | None = None
@@ -234,6 +237,8 @@ class App:
         elif self.model_ready and self.decider:
             # Say how to use it once, then shrink to the idle dot.
             self.overlay.show(self.overlay.idle_state, "Jev ready · hold Right Ctrl to speak" + self._dry_run_note(), 5000)
+        self.remote: RemoteServer | None = None
+        self._apply_remote()
         self._pump()
 
     # ---- thread plumbing -------------------------------------------------
@@ -379,6 +384,7 @@ class App:
 
     def on_settings_changed(self) -> None:
         self.apply_overlay_style()
+        self._apply_remote()
         if self.recorder:
             self.recorder.set_device(self.settings.mic_device)
         self._rebuild_decider()
@@ -423,6 +429,8 @@ class App:
 
     def quit(self) -> None:
         keyboard.unhook_all()
+        if self.remote:
+            self.remote.close()
         if self.recorder:
             self.recorder.close()
         self.tray.stop()
@@ -436,6 +444,10 @@ class App:
             if e.name == "esc" or (e.name == HOTKEY and self._question is None):
                 self._cancel.set()
                 return
+        if self._phone_recording:
+            if time.perf_counter() - self._record_t < PHONE_TIMEOUT_S:
+                return  # the phone is talking; its own release ends the recording
+            self.recording = self._phone_recording = False  # the phone never let go (lost Wi-Fi?)
         if e.name == HOTKEY:
             if e.event_type == keyboard.KEY_DOWN and not self.recording:
                 self._start_recording()
@@ -454,27 +466,33 @@ class App:
         else:
             self.status(self.overlay.idle_state, self.overlay.idle_text)
 
-    def _start_recording(self) -> None:
+    def _start_recording(self, phone: bool = False) -> bool:
         if self.busy and self._question is None:
-            return
+            return False
         if not self.model_ready:
             self.status("warn", "Still loading the speech model…", 2500)
-            return
+            return False
         if self.decider is None:
             self.status("error", "No TypeSafe API key: right-click the tray icon → Settings", 4000)
-            return
+            return False
         self.recording = True
+        self._phone_recording = phone
         self._record_t = time.perf_counter()
-        self.recorder.start()
+        if not phone:
+            self.recorder.start()
         if self._question is None:
             # OCR runs while the user is still speaking, so it's ready by the time they let go.
             self._ocr_future = self._ocr_pool.submit(self.perception.capture, [self.overlay.rect])
-        self.status("listening", "Listening…")
+        self.status("listening", "Listening on your phone…" if phone else "Listening…")
+        return True
 
-    def _stop_recording(self) -> None:
-        self.recording = False
-        audio = self.recorder.stop()
+    def _stop_recording(self, phone_audio: np.ndarray | None = None) -> None:
+        self.recording = self._phone_recording = False
+        audio = self.recorder.stop() if phone_audio is None else phone_audio
         if len(audio) < MIN_AUDIO_S * SAMPLE_RATE:
+            if phone_audio is not None:
+                self._show_waiting()
+                return
             if self._question is None and time.perf_counter() - self._record_t >= MIN_AUDIO_S + 0.5:
                 # Held long enough to be a command, but the mic gave nothing (e.g. just after waking from sleep).
                 self.status("warn", "No sound from the microphone; reconnecting, try again", 3000)
@@ -489,6 +507,62 @@ class App:
         self._cancel.clear()
         self._marked_done = False
         self._work_pool.submit(self._handle_command, audio, self._ocr_future, time.perf_counter())
+
+    # ---- phone remote (see remote.py; called from its server threads) ----
+
+    def _apply_remote(self) -> None:
+        """Start, restart or stop the phone remote to match the settings."""
+        s = self.settings
+        want = (s.remote_port, s.remote_pin) if s.remote_enabled and s.remote_pin else None
+        have = (self.remote.port, self.remote.pin) if self.remote else None
+        if want == have:
+            return
+        if self.remote:
+            self.remote.close()
+            self.remote = None
+        if want:
+            try:
+                self.remote = RemoteServer(self, *want)
+            except Exception as e:
+                log.exception("Could not start the phone remote")
+                self.status("error", f"Phone remote didn't start: {str(e)[:80]}", 5000)
+
+    def remote_press(self) -> str:
+        """The phone's talk button went down: start listening, or stop a running command (like Right Ctrl)."""
+        if self.busy and self._question is None:
+            self._cancel.set()
+            return "stopped"
+        if self.recording and not self._phone_recording:
+            return "busy"  # Right Ctrl is being held on the PC
+        return "listening" if self._start_recording(phone=True) else "unavailable"
+
+    def remote_release(self, audio: np.ndarray) -> None:
+        if self._phone_recording:
+            self._stop_recording(audio)
+
+    def remote_stop(self) -> None:
+        if self._phone_recording:
+            self.recording = self._phone_recording = False
+            self._show_waiting()
+        elif self.busy:
+            self._cancel.set()
+
+    def remote_answer(self, option: int) -> None:
+        """Tapped option `option` (1-based) of the question being asked."""
+        if self._question is not None and 1 <= option <= len(self._question_options):
+            self._answers.put(("key", option - 1))
+
+    def remote_status(self) -> dict:
+        q = self._question
+        return {
+            "state": self.overlay.state,
+            "text": self.overlay.text,
+            "busy": self.busy,
+            "listening": self._phone_recording,
+            "ready": bool(self.model_ready and self.decider),
+            "question": q.prompt if q else None,
+            "options": [label for label, _ in self._question_options] if q else [],
+        }
 
     # ---- command pipeline ------------------------------------------------
 

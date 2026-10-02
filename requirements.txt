@@ -26,3 +26,7 @@ keyboard==0.13.5
 pystray==0.19.5
 pillow==12.3.0
 keyring==25.7.0
+
+# Phone remote: its HTTPS certificate, and the QR code in Settings
+cryptography==50.0.2
+qrcode==8.2
