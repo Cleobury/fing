@@ -35,11 +35,13 @@ _pa_lock = threading.Lock()
 
 def _input_names() -> list[str]:
     """Input device names on the default host API (MME on Windows), which the system default also uses;
-    the other APIs list the same mics again under slightly different names."""
+    the other APIs list the same mics again under slightly different names. MME's Sound Mapper is left
+    out: it just follows the Windows default, which "System default" already covers."""
     hostapi = sd.default.hostapi
     names: list[str] = []
     for d in sd.query_devices():
-        if d["max_input_channels"] > 0 and d["hostapi"] == hostapi and d["name"] not in names:
+        if (d["max_input_channels"] > 0 and d["hostapi"] == hostapi and d["name"] not in names
+                and not d["name"].startswith("Microsoft Sound Mapper")):
             names.append(d["name"])
     return names
 
