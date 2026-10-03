@@ -32,6 +32,8 @@ class Settings:
     min_target_prob: float = 0.4
     # Also read the active window's named controls (icon buttons, tabs, fields) from Windows UI Automation.
     read_controls: bool = True
+    # Read every monitor at once, not just the one the active window is on.
+    all_screens: bool = True
     whisper_model: str = "large-v3-turbo"
     language: str = "en"
     mic_device: str = ""  # input device name; blank = the Windows default microphone

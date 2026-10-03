@@ -31,6 +31,10 @@ Along with the OCR text, it reads the active window's **named controls** from Wi
 Automation): icon-only buttons like Settings, Close or Search, tabs, and unlabelled text boxes. Jev picks those
 like any other text (turn it off in Settings → Jev).
 
+With several monitors, Jev reads **all of them** each time, so it can click something on your other screen and
+you can say "on my left screen". Closer looks still zoom in on the active window's screen. To read only the
+screen you're working on (a little faster), turn off **Read all my screens** in Settings → Jev.
+
 If what it needs isn't apparent, Jev and OCR look harder before giving up:
 
 - **waits** for a slow app or page to load (up to 5 s)
@@ -234,7 +238,7 @@ Right-click the tray icon → **Settings**.
 
 | Tab | What's there |
 |---|---|
-| **Jev** | TypeSafe API key and model, the confidence thresholds for acting, dry run, YOLO mode (and whether it still refuses irreversible actions), and **Start with Windows** (also in the tray menu) |
+| **Jev** | TypeSafe API key and model, the confidence thresholds for acting, dry run, YOLO mode (and whether it still refuses irreversible actions), whether to read button names and all your screens, and **Start with Windows** (also in the tray menu) |
 | **AI planner** | Provider (off, OpenRouter, Ollama), model (**Load list** shows what's available; with OpenRouter, `openrouter/auto` at the top lets OpenRouter's Auto Router pick a model for each request, at that model's normal price), key or server URL, when to use it (only when Jev is confused, or for every command), whether to send a screenshot (needs a vision model), and for Ollama whether to keep the model loaded in memory. Choosing a different Ollama model and pressing **Test** or **Save** unloads the previous one and loads the new one. The **vision model** (the planner's by default) finds icons and images on the screenshot; it has to point accurately, which **Test connections** checks (e.g. `qwen3.8` can; `gemma4` describes screens well but can't). |
 | **Scripts** | Saved scripts: write, name and delete them, set their options, preview the steps (**Break into steps**) and **Run now** |
 | **Phone** | The phone remote: on or off, its address, QR code and PIN (**New PIN** signs phones out), and port (default 8765) |
@@ -248,7 +252,7 @@ Right-click the tray icon → **Settings**.
   recording straight to the PC over your network (HTTPS). With the wake word on, speech near the mic is
   transcribed on the PC to look for the phrase, and thrown away unless it's a command.
 - **Sent to TypeSafe for each decision:** your transcribed command, the active window's title and the text
-  OCR read on screen. No screenshots are sent.
+  OCR read on screen (from every monitor, unless **Read all my screens** is off). No screenshots are sent.
 - **Sent to the AI planner, only when it's used:** the same text with each item's position on screen, plus a
   screenshot if **Send a screenshot** is on. With OpenRouter this goes to OpenRouter and the model's provider; with Ollama it stays on your PC.
 - API keys are kept in Windows Credential Manager, never in files. Settings and logs are in

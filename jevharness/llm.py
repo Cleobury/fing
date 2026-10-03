@@ -50,6 +50,8 @@ Actions:
 Rules:
 - Only list steps still needed: skip anything in steps_done. Use as few steps as possible.
 - Prefer what is on screen now: switch tabs or views (e.g. Store vs Library) when the needed control is elsewhere.
+- With several screens (`screens`), screen_elements and the screenshot cover all of them and each element's `where`
+  names its screen, so "on my left screen" means elements there.
 - Use `problem` to understand what went wrong last time and route around it.
 - Never ask the user where things are on screen or how an app is laid out: work that out yourself from screen_elements
   (and the screenshot, if given), or give your best-guess steps; the executor will look around and report back if a
@@ -105,7 +107,8 @@ Probes:
 - press_key: key, e.g. "escape" (close a popup or menu), "alt+left" (go back), "ctrl+f" (find), "tab", "f10"
   (menu bar), "alt+space" (window menu).
 - zoom: region = one of top-left, top-right, bottom-left, bottom-right, top, bottom, left, right, centre. Re-reads
-  that part of the screen more closely, to find small text or controls OCR missed (often icon bars and corners).
+  that part of the active window's screen more closely, to find small text or controls OCR missed (often icon bars
+  and corners).
 
 Rules:
 - Think about where this app usually keeps what the step needs, and aim there.
@@ -143,16 +146,25 @@ EXPLORE_SCHEMA = {
 
 def describe_elements(screen: Screen, limit: int = 250) -> list[dict]:
     """Screen elements for the AI: id, text, the control kind if UI Automation named it, and position (a region
-    name plus the centre in screen pixels)."""
-    mon = screen.monitor
+    name, with which screen when there are several, plus the centre in pixels from the screenshot's top-left)."""
+    whole = screen.monitor
     out = []
     for e in screen.elements[:limit]:
         cx, cy = e.center
+        mon = screen.monitor_of(e)
         h = ("left", "centre", "right")[min(2, max(0, 3 * (cx - mon["left"]) // mon["width"]))]
         v = ("top", "middle", "bottom")[min(2, max(0, 3 * (cy - mon["top"]) // mon["height"]))]
-        out.append({"id": e.id, "text": e.text[:80], **({"kind": e.kind} if e.kind else {}), "where": f"{v} {h}",
-                    "x": cx - mon["left"], "y": cy - mon["top"]})
+        where = f"{v} {h}" + (f" of the {name}" if (name := screen.screen_name(mon)) else "")
+        out.append({"id": e.id, "text": e.text[:80], **({"kind": e.kind} if e.kind else {}), "where": where,
+                    "x": cx - whole["left"], "y": cy - whole["top"]})
     return out
+
+
+def describe_screens(screen: Screen) -> list[dict]:
+    """The user's monitors, when there are several: name and area in screenshot pixels."""
+    whole = screen.monitor
+    return [{"name": screen.screen_name(m), "x": m["left"] - whole["left"], "y": m["top"] - whole["top"],
+             "width": m["width"], "height": m["height"]} for m in screen.monitors] if len(screen.monitors) > 1 else []
 
 
 LOCATE_SYSTEM = """You look at a screenshot for a voice-controlled computer assistant. It reads the screen with OCR, so it
@@ -240,17 +252,19 @@ def to_command(s: dict) -> str | None:
     return None
 
 
-SCREENSHOT_WIDTH = 1600  # screenshots are scaled down to this width before sending
+SCREENSHOT_WIDTH = 1600  # screenshots are scaled down to this width per screen before sending (screens side by side)
+SCREENSHOT_MAX_WIDTH = 3200  # and to no more than this in all
 
 
-def _screenshot_data_url(screen: Screen, max_width: int = SCREENSHOT_WIDTH) -> str | None:
+def _screenshot_data_url(screen: Screen) -> str | None:
     if screen.shot is None:
         return None
     from PIL import Image
 
     img = Image.frombytes("RGB", screen.shot.size, screen.shot.rgb)
-    if img.width > max_width:
-        img = img.resize((max_width, round(img.height * max_width / img.width)), Image.LANCZOS)
+    w, h = _sent_size(screen)
+    if (w, h) != img.size:
+        img = img.resize((w, h), Image.LANCZOS)
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=85)
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
@@ -259,7 +273,9 @@ def _screenshot_data_url(screen: Screen, max_width: int = SCREENSHOT_WIDTH) -> s
 def _sent_size(screen: Screen) -> tuple[int, int]:
     """Size of the screenshot as the model sees it (after _screenshot_data_url's scaling)."""
     w, h = screen.shot.size
-    return (w, h) if w <= SCREENSHOT_WIDTH else (SCREENSHOT_WIDTH, round(h * SCREENSHOT_WIDTH / w))
+    across = len({m["left"] for m in screen.monitors})  # screens side by side
+    max_w = min(SCREENSHOT_WIDTH * across, SCREENSHOT_MAX_WIDTH)
+    return (w, h) if w <= max_w else (max_w, round(h * max_w / w))
 
 
 def _parse_json(content: str) -> dict:
@@ -305,6 +321,7 @@ class Planner:
             "history": list(history),
             "problem": problem,
             "active_window": screen.window_title,
+            **({"screens": screens} if (screens := describe_screens(screen)) else {}),
             "screen_elements": describe_elements(screen),
             "user_answers": [{"question": q, "answer": a} for q, a in answers],
         }
@@ -405,6 +422,7 @@ class Planner:
             "history": list(history),
             "active_window": screen.window_title,
             "screen_size": [screen.monitor["width"], screen.monitor["height"]],
+            **({"screens": screens} if (screens := describe_screens(screen)) else {}),
             "screen_elements": describe_elements(screen),
             "tried": tried,
         }

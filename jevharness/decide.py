@@ -189,11 +189,17 @@ def split_candidates(command: str) -> list[list[str]]:
     return [list(o) for o in options]
 
 
-def _region(el: Element, mon: dict) -> str:
+def _region(el: Element, screen: Screen, of_the_screen: bool = False) -> str:
+    """Where an element is: a part of its monitor, plus which screen when there are several (or "of the screen",
+    if asked, when there's one)."""
     cx, cy = el.center
+    mon = screen.monitor_of(el)
     h = ("left", "centre", "right")[min(2, max(0, 3 * (cx - mon["left"]) // mon["width"]))]
     v = ("top", "middle", "bottom")[min(2, max(0, 3 * (cy - mon["top"]) // mon["height"]))]
-    return "centre" if (h, v) == ("centre", "middle") else f"{v} {h}"
+    part = "centre" if (h, v) == ("centre", "middle") else f"{v} {h}"
+    if name := screen.screen_name(mon):
+        return f"{part} of the {name}"
+    return f"{part} of the screen" if of_the_screen else part
 
 
 def _named(e: Element) -> str:
@@ -351,10 +357,10 @@ class Decider:
             "command": command,
             **(context or {}),
             "active_window": screen.window_title,
-            "screen_elements": [{"id": e.id, "text": e.text[:120], "where": _region(e, screen.monitor),
+            "screen_elements": [{"id": e.id, "text": e.text[:120], "where": _region(e, screen),
                                  **({"kind": e.kind} if e.kind else {})} for e in targets],
         }
-        target_options = {e.id: f"{_named(e)} ({_region(e, screen.monitor)} of the screen)" for e in targets}
+        target_options = {e.id: f"{_named(e)} ({_region(e, screen, of_the_screen=True)})" for e in targets}
         target_options["none"] = "No listed element: the command needs no on-screen target, or what it refers to is not visible"
 
         questions = {

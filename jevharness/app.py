@@ -319,6 +319,7 @@ class App:
 
             self.perception = Perception()
             self.perception.use_controls = self.settings.read_controls
+            self.perception.all_screens = self.settings.all_screens
             self.recorder = Recorder(self.settings.mic_device)
             self.listener = Listener(self.transcriber, self._wake_allowed, self._on_wake, self._on_heard)
             self.recorder.add_listener(self.listener.feed)
@@ -410,6 +411,7 @@ class App:
         self._apply_listener()
         if self.perception:
             self.perception.use_controls = self.settings.read_controls
+            self.perception.all_screens = self.settings.all_screens
         self._rebuild_decider()
         # Serve the chosen local model now (unloading the previous one), or unload it if Ollama's no longer used.
         self.serve_model_in_background(self.planner, announce=True)
