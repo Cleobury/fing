@@ -27,6 +27,7 @@ KINDS = {
 _NAME, _RECT, _TYPE, _ENABLED, _OFFSCREEN = 30005, 30001, 30003, 30010, 30022  # UIA property ids
 _DESCENDANTS = 4  # TreeScope_Descendants
 MAX_CONTROLS = 150
+WAKE_WALKS = 2  # full-tree walks per window to switch on a Chromium/Electron app's web-content accessibility
 TIMEOUT_S = 1.5  # a huge or hung app's tree isn't worth waiting for: OCR alone is fine
 
 
@@ -35,6 +36,7 @@ class Controls:
         self._pool = ThreadPoolExecutor(1, thread_name_prefix="uia", initializer=self._init_thread)
         self._uia = None
         self._busy = None  # the last query, while it's still running (a slow app): skip rather than queue up
+        self._walks: dict[int, int] = {}  # window -> full-tree walks done to wake its accessibility
         self.broken = False
 
     @staticmethod
@@ -95,7 +97,16 @@ class Controls:
             self._setup()
         auto, cache, condition = self._uia
         root = auto.ElementFromHandle(ctypes.c_void_p(hwnd))
+        # Chromium and Electron apps (Brave, Discord, VS Code…) only build their page's accessibility tree once
+        # something walks it, and report almost nothing until then. Walk a new window's whole tree first, and once
+        # more if a Chromium window still looks empty.
+        walks = self._walks.get(hwnd, 0)
+        if walks == 0:
+            self._wake(auto, root, hwnd)
         found = root.FindAllBuildCache(_DESCENDANTS, condition, cache)
+        if found.Length <= 3 and walks < WAKE_WALKS and _is_chromium(hwnd):
+            self._wake(auto, root, hwnd)
+            found = root.FindAllBuildCache(_DESCENDANTS, condition, cache)
         out = []
         for i in range(found.Length):
             el = found.GetElement(i)
@@ -110,3 +121,15 @@ class Controls:
             if len(out) >= MAX_CONTROLS:
                 break
         return out
+
+    def _wake(self, auto, root, hwnd: int) -> None:
+        if len(self._walks) > 500:
+            self._walks.clear()  # window handles are reused: don't grow forever
+        self._walks[hwnd] = self._walks.get(hwnd, 0) + 1
+        root.FindAll(_DESCENDANTS, auto.CreateTrueCondition())
+
+
+def _is_chromium(hwnd: int) -> bool:
+    cls = ctypes.create_unicode_buffer(64)
+    ctypes.windll.user32.GetClassNameW(hwnd, cls, 64)
+    return cls.value.startswith("Chrome_WidgetWin")
