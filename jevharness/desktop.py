@@ -38,12 +38,17 @@ def foreground_center() -> tuple[int, int] | None:
     return (r.left + r.right) // 2, (r.top + r.bottom) // 2
 
 
-def monitor_at(monitors: list[dict], x: int, y: int) -> dict:
-    """The mss monitor containing (x, y), else the primary."""
-    return next(
+_PRIMARY = object()
+
+
+def monitor_at(monitors: list[dict], x: int, y: int, default=_PRIMARY) -> dict | None:
+    """The mss monitor containing (x, y), else `default` (the primary, unless given)."""
+    found = next(
         (m for m in monitors if m["left"] <= x < m["left"] + m["width"] and m["top"] <= y < m["top"] + m["height"]),
-        next(m for m in monitors if m.get("is_primary")),
-    )
+        None)
+    if found is not None:
+        return found
+    return next(m for m in monitors if m.get("is_primary")) if default is _PRIMARY else default
 
 
 _kernel32 = ctypes.windll.kernel32

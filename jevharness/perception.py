@@ -3,7 +3,9 @@
 import asyncio
 import statistics
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+import numpy as np
 
 import mss
 from winrt.windows.graphics.imaging import BitmapPixelFormat, SoftwareBitmap
@@ -39,11 +41,35 @@ class Element:
 
 @dataclass
 class Screen:
-    monitor: dict  # mss monitor: left, top, width, height (physical pixels, virtual-screen coords)
+    monitor: dict  # area read, as an mss monitor: left, top, width, height (physical pixels, virtual-screen coords)
     window_title: str
     elements: list[Element]
     ocr_ms: float
-    shot: object = None  # the mss screenshot, for the AI planner's vision input
+    shot: object = None  # the mss screenshot of `monitor`, for the AI planner's vision input
+    # The physical monitors inside `monitor`: just it for one screen, or each of them when reading all screens.
+    monitors: list[dict] = field(default_factory=list)
+
+    def __post_init__(self):
+        if not self.monitors:
+            self.monitors = [self.monitor]
+
+    def monitor_of(self, el: Element) -> dict:
+        """The monitor an element is on."""
+        return monitor_at(self.monitors, *el.center, default=self.monitors[0])
+
+    def screen_name(self, mon: dict) -> str:
+        """What to call a monitor when there are several ("left screen", "main screen"…); blank for just one."""
+        if len(self.monitors) < 2:
+            return ""
+        xs = sorted({m["left"] for m in self.monitors})
+        ys = sorted({m["top"] for m in self.monitors})
+        if len(xs) == len(self.monitors) and len(xs) <= 3:  # side by side
+            name = ("left", "middle", "right")[0 if mon["left"] == xs[0] else 2 if mon["left"] == xs[-1] else 1]
+        elif len(ys) == len(self.monitors) and len(ys) <= 3:  # stacked
+            name = ("top", "middle", "bottom")[0 if mon["top"] == ys[0] else 2 if mon["top"] == ys[-1] else 1]
+        else:
+            name = f"#{self.monitors.index(mon) + 1}"
+        return f"{name} screen" + (" (main)" if mon.get("is_primary") else "")
 
 
 # Named parts of a monitor for a closer look, as fractions (left, top, right, bottom). Overlapping on purpose,
@@ -70,7 +96,7 @@ def merge_elements(screen: Screen, extra: list[Element]) -> Screen:
     for el in extra:
         if not any(same(el, m) for m in merged):
             merged.append(Element(f"e{len(merged) + 1}", el.text, el.left, el.top, el.width, el.height, el.kind))
-    return Screen(screen.monitor, screen.window_title, merged, screen.ocr_ms, screen.shot)
+    return Screen(screen.monitor, screen.window_title, merged, screen.ocr_ms, screen.shot, screen.monitors)
 
 
 def _intersects(a, b) -> bool:
@@ -82,21 +108,18 @@ def _same_label(a: str, b: str) -> bool:
     return bool(a and b) and (a in b or b in a)
 
 
-def add_controls(elements: list[Element], controls: list, mon: dict, exclude=()) -> list[Element]:
+def add_controls(elements: list[Element], controls: list, monitors: list[dict], exclude=()) -> list[Element]:
     """OCR elements plus UI Automation controls ((name, kind, rect) from accessibility.Controls).
 
     A control whose name OCR already read inside its box just tags that OCR element with its kind; the rest
-    (icon buttons, unlabelled fields, text OCR missed) become new elements. Controls off this monitor, tiny,
+    (icon buttons, unlabelled fields, text OCR missed) become new elements. Controls off the monitors read, tiny,
     or as big as a whole panel are skipped.
     """
     out = list(elements)
-    area = mon["width"] * mon["height"]
     for name, kind, (l, t, r, b) in controls:
         w, h = r - l, b - t
-        cx, cy = l + w // 2, t + h // 2
-        if w < 4 or h < 4 or w * h > area * 0.25:
-            continue
-        if not (mon["left"] <= cx < mon["left"] + mon["width"] and mon["top"] <= cy < mon["top"] + mon["height"]):
+        mon = monitor_at(monitors, l + w // 2, t + h // 2, default=None)
+        if mon is None or w < 4 or h < 4 or w * h > mon["width"] * mon["height"] * 0.25:
             continue
         if any(_intersects((l, t, r, b), x) for x in exclude):
             continue
@@ -118,14 +141,17 @@ class Perception:
             raise RuntimeError("Windows OCR is unavailable: add an OCR-capable language in Settings > Time & language")
         self.controls = Controls()
         self.use_controls = True  # read named controls with UI Automation along with OCR (Settings → Jev)
+        self.all_screens = True  # a full read covers every monitor, not just the active window's (Settings → Jev)
 
     def capture(self, exclude: list[tuple[int, int, int, int]] = (), follow: str = "cursor",
                 scale: float = 1.0, region: str | None = None, invert: bool = False) -> Screen:
-        """OCR the monitor under the mouse (follow="cursor") or holding the active window (follow="foreground").
+        """OCR every monitor (with all_screens on), else the monitor under the mouse (follow="cursor") or holding
+        the active window (follow="foreground").
 
         Elements overlapping `exclude` rects (our own overlay) are dropped. For a closer look, `scale` enlarges
         the image before OCR (small text it would otherwise miss) and `region` (see REGIONS) limits it to part
-        of the monitor, and `invert` reads a high-contrast negative (light text on dark backgrounds). Element
+        of the monitor, and `invert` reads a high-contrast negative (light text on dark backgrounds). A closer
+        look is always of the one monitor, as all of them would be over the OCR engine's size limit. Element
         positions are always real screen pixels.
 
         A normal full read also adds the active window's named controls from UI Automation (see add_controls).
@@ -136,15 +162,24 @@ class Perception:
         controls = self.controls.start(foreground_window()) if plain and self.use_controls else None
         point = (foreground_center() if follow == "foreground" else None) or cursor_pos()
         with mss.MSS() as sct:
-            mon = monitor_at(sct.monitors[1:], *point)
+            if plain and self.all_screens and len(sct.monitors) > 2:
+                mon, monitors = sct.monitors[0], sct.monitors[1:]  # [0] is the box around all of them
+            else:
+                mon = monitor_at(sct.monitors[1:], *point)
+                monitors = [mon]
             shot = sct.grab(mon)
 
-        ox, oy = mon["left"], mon["top"]
+        elements: list[Element] = []
         if plain:
-            data, width, height = bytes(shot.bgra), shot.width, shot.height
+            pixels = np.frombuffer(shot.bgra, np.uint8).reshape(shot.height, shot.width, 4)
+            for m in monitors:  # one OCR pass per monitor: each is within the engine's size limit
+                x0, y0 = m["left"] - mon["left"], m["top"] - mon["top"]
+                part = np.ascontiguousarray(pixels[y0:y0 + m["height"], x0:x0 + m["width"]])
+                self._read(part.tobytes(), m["width"], m["height"], m["left"], m["top"], 1.0, exclude, elements)
         else:
             from PIL import Image
 
+            ox, oy = mon["left"], mon["top"]
             img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
             if region is not None:
                 x0, y0, x1, y1 = region_box(region, shot.width, shot.height)
@@ -156,14 +191,20 @@ class Perception:
                 img = ImageOps.autocontrast(ImageOps.invert(img.convert("L"))).convert("RGB")
             scale = min(scale, (OcrEngine.max_image_dimension - 1) / max(img.size))  # the OCR engine's size limit
             img = img.resize((round(img.width * scale), round(img.height * scale)), Image.LANCZOS)
-            data, (width, height) = img.convert("RGBA").tobytes("raw", "BGRA"), img.size
+            self._read(img.convert("RGBA").tobytes("raw", "BGRA"), *img.size, ox, oy, scale, exclude, elements)
 
+        if controls is not None:
+            elements = add_controls(elements, self.controls.collect(controls), monitors, exclude)
+        return Screen(mon, title, elements, (time.perf_counter() - t0) * 1000, shot, monitors)
+
+    def _read(self, data: bytes, width: int, height: int, ox: int, oy: int, scale: float, exclude,
+              elements: list[Element]) -> None:
+        """OCR one BGRA image whose top-left is (ox, oy) on screen, enlarged by `scale`, adding to `elements`."""
         writer = DataWriter()
         writer.write_bytes(data)
         bitmap = SoftwareBitmap.create_copy_from_buffer(writer.detach_buffer(), BitmapPixelFormat.BGRA8, width, height)
         result = asyncio.run(self._recognize(bitmap))
 
-        elements: list[Element] = []
         for line in result.lines:
             for words in self._split(list(line.words)):
                 xs = [w.bounding_rect.x for w in words]
@@ -180,9 +221,6 @@ class Perception:
                 )
                 if not any(_intersects(el.rect, r) for r in exclude):
                     elements.append(el)
-        if controls is not None:
-            elements = add_controls(elements, self.controls.collect(controls), mon, exclude)
-        return Screen(mon, title, elements, (time.perf_counter() - t0) * 1000, shot)
 
     async def _recognize(self, bitmap):
         return await self._engine.recognize_async(bitmap)
