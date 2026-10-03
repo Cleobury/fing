@@ -5,6 +5,7 @@ app being controlled.
 """
 
 import ctypes
+import math
 import tkinter as tk
 import tkinter.font as tkfont
 from ctypes import wintypes
@@ -38,6 +39,14 @@ def _mix(a: str, b: str, t: float) -> str:
     """Blend colour `a` towards `b` by t (0..1)."""
     (r1, g1, b1), (r2, g2, b2) = (tuple(int(c[i:i + 2], 16) for i in (1, 3, 5)) for c in (a, b))
     return "#%02x%02x%02x" % (round(r1 + (r2 - r1) * t), round(g1 + (g2 - g1) * t), round(b1 + (b2 - b1) * t))
+
+
+def _ease_out(t: float) -> float:
+    return 1 - (1 - t) ** 3
+
+
+def _ease_in(t: float) -> float:
+    return t ** 3
 
 
 def _work_area() -> tuple[int, int, int, int]:
@@ -86,6 +95,8 @@ class Overlay:
         self.hwnd = _make_passive(self.win)
         self.state = "loading"
         self._pulse_on = False
+        self._ring_job = None  # the mic open/close ring animation in progress
+        self._dot_at = (self.DOT // 2, self.DOT // 2, 9)  # the dot's centre, and the largest ring that fits around it
         self._revert_job = None
         self._clickable = False
         self._hidden = False  # hidden because a fullscreen app is in front
@@ -144,6 +155,7 @@ class Overlay:
             dot_y = h // 2
             c.create_oval(0, 0, w, h, fill=self.bg, outline=self.bg)
             c.create_oval(5, 5, w - 5, h - 5, fill=self.dots[state], outline="", tags="dot")
+            self._dot_at = (w // 2, h // 2, w // 2 - 1)
         c.configure(width=w, height=h)
         x, y = self._place(w, dot_y, ax, ay, align)
         self.win.geometry(f"{w}x{h}{x:+d}{y:+d}")
@@ -187,6 +199,7 @@ class Overlay:
         self._round_rect(0, 0, w, h, radius)
         dot_x = w - self._DOT_X if mirrored else self._DOT_X
         c.create_oval(dot_x - 5, dot_y - 5, dot_x + 5, dot_y + 5, fill=self.dots[state], outline="", tags="dot")
+        self._dot_at = (dot_x, dot_y, min(15, dot_y - 1, h - dot_y - 1))
         text_x = 14 + extra if mirrored else self.PAD_X  # mirrored: dot on the right, text still left-aligned
         for i, row in enumerate(rows):
             c.create_text(text_x, centre(i), text=row, anchor="w", fill=self.fg, font=self.font)
@@ -317,6 +330,58 @@ class Overlay:
         style = _user32.GetWindowLongW(self.hwnd, -20)
         _user32.SetWindowLongW(self.hwnd, -20, (style & ~0x20) if on else (style | 0x20))
         self._clickable = on
+
+    RING_MS = 25  # the mic open/close animation's frame time
+
+    def mic_opened(self) -> None:
+        """The mic just opened (whatever opened it): the dot pops and a soft glow and two rings ripple out of it."""
+        self._ring(opening=True)
+
+    def mic_closed(self) -> None:
+        """The mic just closed: two rings fold back into the dot, which settles with a small bounce."""
+        self._ring(opening=False)
+
+    # Each layer: (first frame, frames it lasts). Opening: glow, then two rings a beat apart, while the dot pops.
+    _OPEN = {"glow": (0, 14), "ring1": (0, 18), "ring2": (6, 18), "pop": (0, 10)}
+    _CLOSE = {"ring1": (0, 14), "ring2": (4, 14), "pop": (16, 8)}
+
+    def _ring(self, opening: bool, frame: int = 0) -> None:
+        if frame == 0 and self._ring_job:
+            self.root.after_cancel(self._ring_job)
+        self._ring_job = None
+        c = self.canvas
+        c.delete("ring")
+        x, y, biggest = self._dot_at
+        layers = self._OPEN if opening else self._CLOSE
+        total = max(a + n for a, n in layers.values())
+        if frame >= total:
+            c.coords("dot", x - 5, y - 5, x + 5, y + 5)
+            return
+        own = self.dots["listening"] if opening else self.dots.get(self.state, self.dots["idle"])
+
+        def progress(layer: str) -> float | None:
+            first, n = layers.get(layer, (0, 0))
+            return (frame - first) / (n - 1) if n and first <= frame < first + n else None
+
+        if (t := progress("glow")) is not None:  # a soft halo that swells and fades
+            r = 6 + (biggest * 0.8 - 6) * _ease_out(t)
+            c.create_oval(x - r, y - r, x + r, y + r, fill=_mix(own, self.bg, 0.65 + 0.35 * t), outline="", tags="ring")
+        for name, width in (("ring1", 3.0), ("ring2", 2.0)):
+            if (t := progress(name)) is None:
+                continue
+            if opening:  # out from the dot, thinning and fading
+                r = 6 + (biggest - 6) * _ease_out(t)
+                colour, w = _mix(own, self.bg, t), max(1.0, width * (1 - t))
+            else:  # in from the edge, brightening as it lands
+                r = biggest - (biggest - 6) * _ease_in(t)
+                colour, w = _mix(own, self.bg, 1 - t), 1.0 + (width - 1) * t
+            c.create_oval(x - r, y - r, x + r, y + r, outline=colour, width=w, tags="ring")
+        if (t := progress("pop")) is not None:  # the dot swells a little and settles back
+            r = 5 + 2.5 * math.sin(math.pi * t)
+            c.coords("dot", x - r, y - r, x + r, y + r)
+        # Under the dot and the text, over the pill's background.
+        c.tag_lower("ring", "dot")
+        self._ring_job = self.root.after(self.RING_MS, lambda: self._ring(opening, frame + 1))
 
     def _pulse(self) -> None:
         if self.state == "listening":

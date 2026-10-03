@@ -56,3 +56,16 @@ class Transcriber:
             initial_prompt=prompt,
         )
         return " ".join(s.text.strip() for s in segments).strip()
+
+    def heard(self, audio: np.ndarray) -> str:
+        """A quick transcription of a short stretch of speech, for spotting the wake phrase. No prompt: one
+        naming the phrase would make Whisper "hear" it in any noise."""
+        segments, _ = self.model.transcribe(
+            audio,
+            language=self.language,
+            beam_size=1,
+            vad_filter=True,
+            without_timestamps=True,
+            condition_on_previous_text=False,
+        )
+        return " ".join(s.text.strip() for s in segments).strip()

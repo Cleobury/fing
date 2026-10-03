@@ -130,6 +130,13 @@ It runs without a console window. To see its log output while debugging, run it 
 | Tray icon → **Dry run** | Highlights what it would do, without doing it |
 | Tray icon → **YOLO mode** | Decides everything itself instead of asking (see below) |
 | Hold the button on your **phone** | Same as holding Right Ctrl, using the phone's microphone (see below) |
+| Say **"Hey Jev"** (if the wake word is on) | Same as holding Right Ctrl: it listens until you stop talking. "Hey Jev, open Steam" works in one breath, or pause after "Hey Jev" (see below) |
+| Tray icon → **Listen for wake word** | Turns the wake word on or off |
+
+Whenever the microphone opens, however it opened (Right Ctrl, the phone, the wake word or a question listening for
+its answer), the indicator's dot pops and two rings ripple out of it, with a rising chime; when it closes, the
+rings fold back in, with a falling chime. The phone's button does the same. Settings → Hands-free turns the
+chimes off.
 
 Things you can say:
 
@@ -231,13 +238,15 @@ Right-click the tray icon → **Settings**.
 | **AI planner** | Provider (off, OpenRouter, Ollama), model (**Load list** shows what's available; with OpenRouter, `openrouter/auto` at the top lets OpenRouter's Auto Router pick a model for each request, at that model's normal price), key or server URL, when to use it (only when Jev is confused, or for every command), whether to send a screenshot (needs a vision model), and for Ollama whether to keep the model loaded in memory. Choosing a different Ollama model and pressing **Test** or **Save** unloads the previous one and loads the new one. The **vision model** (the planner's by default) finds icons and images on the screenshot; it has to point accurately, which **Test connections** checks (e.g. `qwen3.8` can; `gemma4` describes screens well but can't). |
 | **Scripts** | Saved scripts: write, name and delete them, set their options, preview the steps (**Break into steps**) and **Run now** |
 | **Phone** | The phone remote: on or off, its address, QR code and PIN (**New PIN** signs phones out), and port (default 8765) |
+| **Hands-free** | The wake word: on or off, the phrase (rated as you type, with stronger suggestions), **Test**, and sensitivity; and **Listen for my answer automatically** (see Hands-free below) |
 | **PC search** | Search with PowerToys instead of the Start menu, and its shortcut (default `left alt+space`; **Record** captures a new one, **Detect** reads it from PowerToys) |
 | **Indicator** | Background and text colour, opacity, the dot colour for each state, and its position (presets, **Drag…** to place it anywhere, or **Reset position**). Changes preview live. |
 
 ## Privacy
 
 - **Your voice never leaves your PC.** Whisper runs locally. With the phone remote, the phone sends the
-  recording straight to the PC over your network (HTTPS).
+  recording straight to the PC over your network (HTTPS). With the wake word on, speech near the mic is
+  transcribed on the PC to look for the phrase, and thrown away unless it's a command.
 - **Sent to TypeSafe for each decision:** your transcribed command, the active window's title and the text
   OCR read on screen. No screenshots are sent.
 - **Sent to the AI planner, only when it's used:** the same text with each item's position on screen, plus a
@@ -257,6 +266,25 @@ Right-click the tray icon → **Settings**.
   microphone-in-use indicator.
 - Pressing Right Ctrl together with another key (e.g. Right Ctrl+C) is left alone as a normal shortcut.
 
+## Hands-free: the wake word and continuous conversation
+
+Settings → **Hands-free**:
+
+- **Listen for a wake word.** Type any phrase; it works straight away, with no training. Jev rates the phrase as
+  you type: one word, or everyday words only ("hey you"), go off easily from normal talk, TV and calls, so it
+  suggests two-word phrases like **Hey Jev** or **Okay Jev** (click one to use it). **Test** listens without
+  triggering anything and shows what it heard and how many times the phrase would have gone off, and
+  **Sensitivity** trades false triggers against missed ones.
+- **Listen for my answer automatically.** When Jev asks a question, the mic opens by itself after the beep and
+  closes when you stop talking (or after 8 s of silence; the question stays up for the number keys or Right
+  Ctrl). If you gave the command from your phone, the phone listens instead of the PC, as long as its page is
+  open and you've used its mic since opening it; otherwise the question waits for a tap.
+
+How it works: the microphone is already open (see below), and speech in it is checked with the Whisper model
+that's already loaded. Nothing leaves the PC until you give a command. While Jev is carrying out a command it
+ignores the wake word, so nothing it plays can set it off. The GPU does a little work whenever someone talks
+near the mic while the wake word is on.
+
 ## Troubleshooting
 
 Logs, including every decision Jev made and its probabilities, are in `%APPDATA%\JevHarness\logs`
@@ -269,6 +297,8 @@ Logs, including every decision Jev made and its probabilities, are in `%APPDATA%
 | "CUDA unavailable: transcribing on CPU" | Update the NVIDIA driver. The CUDA libraries themselves come from `requirements.txt`. |
 | "Windows OCR is unavailable" | Add a language with OCR support: Settings → Time & language → Language & region |
 | Nothing happens on Right Ctrl | Check the tray icon is there; the focused app may be running as administrator |
+| The wake word goes off by itself | Use two words with a name in it (Settings → Hands-free suggests some), or move **Sensitivity** towards "Fewer false triggers". **Test** shows what it's hearing. |
+| The wake word doesn't respond | Press **Test** and say it: if the match stays below the line, move **Sensitivity** towards "Catches more" or pick a phrase Whisper spells more reliably |
 | "Add TypeSafe API key" on the indicator | Add it in Settings → Jev, then **Test connections** |
 | PC search types into the wrong place | In Settings → PC search, press **Detect** or **Record** to match your PowerToys shortcut |
 
@@ -288,6 +318,7 @@ if you used `-Startup`) and `%APPDATA%\JevHarness`. The API keys are under **Jev
 | `desktop.py` | Win32: foreground and open app windows, switching to a window, fullscreen detection, waiting for the screen to settle |
 | `executor.py` | Mouse (clicks, drags, scrolling), keyboard, launching and switching apps, PC search |
 | `stt.py`, `audio.py` | Whisper on CUDA; microphone capture with a short pre-roll |
+| `listen.py`, `wakephrase.py` | Hands-free: speech detection on the open mic, spotting the wake phrase, recording an answer without Right Ctrl; rating a phrase |
 | `remote.py`, `web/index.html` | Phone remote: HTTPS server on the local network (self-signed certificate, PIN) and the hold-to-talk page |
 | `apps.py` | Installed Start-menu apps, for "open <app>" |
 | `search.py` | Searching the PC: PowerToys via its shortcut, or the Start menu |
@@ -300,3 +331,6 @@ if you used `-Startup`) and `%APPDATA%\JevHarness`. The API keys are under **Jev
 
 Whisper must load before anything in the process initialises COM (Windows OCR, PortAudio, the tray icon), or
 CTranslate2 crashes. That's why `.audio` and `.perception` are imported late in `app.py`.
+
+The hands-free logic (speech detection, phrase matching and rating) has tests that run anywhere:
+`pip install pytest`, then `python -m pytest`.
