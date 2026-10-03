@@ -33,6 +33,10 @@ class Settings:
     whisper_model: str = "large-v3-turbo"
     language: str = "en"
     mic_device: str = ""  # input device name; blank = the Windows default microphone
+    # Phone remote: a hold-to-talk page served on the local network (see remote.py).
+    remote_enabled: bool = False
+    remote_port: int = 8765
+    remote_pin: str = ""
     # AI planner used when Jev is confused: "off", "openrouter" or "ollama".
     llm_provider: str = "off"
     llm_model: str = "google/gemini-3.8-flash"

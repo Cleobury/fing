@@ -109,6 +109,10 @@ class Overlay:
 
     DOT = 20  # size of the idle dot
 
+    @property
+    def text(self) -> str:
+        return self._text
+
     def show(self, state: str, text: str, hold_ms: int | None = None, check: bool = False) -> None:
         """Display a state; empty text shows just the dot. With hold_ms, return to idle afterwards.
         With check, add a ✓ button on the right for "it's done, stop" (calls on_check)."""

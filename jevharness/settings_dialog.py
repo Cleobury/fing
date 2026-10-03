@@ -9,7 +9,7 @@ from tkinter import colorchooser, ttk
 import keyboard
 from typesafe_sdk import TypeSafeAPIError, TypeSafeAuthenticationError, TypeSafeError
 
-from . import autostart, search
+from . import autostart, remote, search
 from .decide import Decider
 from .llm import PROVIDERS, Planner
 from .overlay import DEFAULT_BG, DEFAULT_DOTS, DEFAULT_FG
@@ -72,6 +72,7 @@ class SettingsDialog:
         self._build_jev_tab(tabs, s)
         self._build_planner_tab(tabs, s)
         self._build_search_tab(tabs, s)
+        self._build_phone_tab(tabs, s)
         self._build_scripts_tab(tabs)
         self._build_indicator_tab(tabs, s)
 
@@ -276,6 +277,68 @@ class SettingsDialog:
             if current:
                 msg += f". “{current}” can't be used for planning, so I picked {models[0]}"
         self.status.set(msg)
+
+    # ---- Phone remote -----------------------------------------------------------------
+
+    def _build_phone_tab(self, tabs, s) -> None:
+        f = self._tab(tabs, "Phone")
+        ttk.Label(f, text="Hold a button on your phone to talk to Jev instead of Right Ctrl, over your Wi-Fi.",
+                  foreground="#5f6368", wraplength=480).grid(row=0, column=0, columnspan=3, sticky="w")
+        self.remote_on = tk.BooleanVar(value=s.remote_enabled)
+        self.remote_pin = tk.StringVar(value=s.remote_pin or remote.new_pin())
+        self.remote_port = tk.IntVar(value=s.remote_port)
+        self.remote_url = tk.StringVar()
+        ttk.Checkbutton(f, text="Let my phone control Jev on this network", variable=self.remote_on,
+                        command=self._remote_changed).grid(row=1, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        _row(f, 2, "Address")
+        ttk.Entry(f, textvariable=self.remote_url, state="readonly", width=34).grid(row=2, column=1, columnspan=2, sticky="we", pady=(8, 0))
+        _row(f, 3, "PIN")
+        ttk.Label(f, textvariable=self.remote_pin, font=("Consolas", 12, "bold")).grid(row=3, column=1, sticky="w", pady=(8, 0))
+        ttk.Button(f, text="New PIN", command=self._new_remote_pin).grid(row=3, column=2, sticky="w", pady=(8, 0))
+        _row(f, 4, "Port")
+        port = ttk.Spinbox(f, from_=1024, to=65535, textvariable=self.remote_port, width=7, command=self._remote_changed)
+        port.grid(row=4, column=1, sticky="w", pady=(8, 0))
+        port.bind("<KeyRelease>", lambda _: self._remote_changed())
+        self.qr = tk.Canvas(f, width=180, height=180, highlightthickness=0, background="white")
+        self.qr.grid(row=5, column=0, rowspan=2, sticky="nw", pady=(14, 0))
+        ttk.Label(f, wraplength=290, foreground="#5f6368", justify="left", text=(
+            "Scan the code with your phone's camera (it includes the PIN), then Save here. "
+            "The first time, your phone warns that the connection isn't private, because this PC made its own "
+            "certificate: choose Advanced → Proceed, or Show Details → visit this website. "
+            "If Windows asks, allow Jev Harness on private networks.\n\n"
+            "Anyone with the PIN on your network can control this PC; New PIN signs out every phone.")).grid(
+            row=5, column=1, columnspan=2, sticky="nw", padx=(12, 0), pady=(14, 0))
+        self._remote_changed()
+
+    def _new_remote_pin(self) -> None:
+        self.remote_pin.set(remote.new_pin())
+        self._remote_changed()
+
+    def _remote_port(self) -> int | None:
+        try:
+            port = int(self.remote_port.get())
+        except (tk.TclError, ValueError):
+            return None
+        return port if 1024 <= port <= 65535 else None
+
+    def _remote_changed(self) -> None:
+        port = self._remote_port()
+        on = self.remote_on.get() and port is not None
+        link = remote.url(port, self.remote_pin.get()) if on else ""
+        self.remote_url.set(link.split("#")[0] if on else "Turn it on to get the address")
+        self.qr.delete("all")
+        if not on:
+            return
+        import qrcode
+
+        code = qrcode.QRCode(border=2, error_correction=qrcode.constants.ERROR_CORRECT_M)
+        code.add_data(link)
+        matrix = code.get_matrix()
+        cell = 180 / len(matrix)
+        for y, row in enumerate(matrix):
+            for x, dark in enumerate(row):
+                if dark:
+                    self.qr.create_rectangle(x * cell, y * cell, (x + 1) * cell, (y + 1) * cell, fill="black", width=0)
 
     # ---- PC search --------------------------------------------------------------------
 
@@ -671,6 +734,10 @@ class SettingsDialog:
         except (tk.TclError, ValueError):
             self.status.set("Probabilities must be numbers between 0 and 1.")
             return
+        remote_port = self._remote_port()
+        if remote_port is None:
+            self.status.set("The phone port must be a number from 1024 to 65535.")
+            return
         hotkey = self.hotkey.get().strip().lower() or search.DEFAULT_HOTKEY
         if self.powertoys.get() and not search.valid_hotkey(hotkey):
             self.status.set(f"“{hotkey}” isn't a shortcut I recognise. Try Record, or e.g. “left alt+space”.")
@@ -678,6 +745,9 @@ class SettingsDialog:
         s = self.app.settings
         s.model = self.model.get().strip() or "jev-latest"
         s.dry_run = self.dry_run.get()
+        s.remote_enabled = self.remote_on.get()
+        s.remote_pin = self.remote_pin.get()
+        s.remote_port = remote_port
         s.mic_device = "" if self.mic.get() == _SYSTEM_DEFAULT_MIC else self.mic.get()
         s.yolo = self.yolo.get()
         s.yolo_allow_irreversible = not self.yolo_irreversible.get()
