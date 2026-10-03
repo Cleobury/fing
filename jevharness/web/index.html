@@ -69,6 +69,12 @@
     transition: transform .15s ease, box-shadow .3s, background .3s;
   }
   #talk svg { width: 34%; height: 34%; }
+  /* The mic opening (a ring bursts out of the button) and closing (a ring shrinks back into it). */
+  .burst { position: absolute; inset: 11%; border-radius: 50%; border: 3px solid var(--live-a); opacity: 0; pointer-events: none; }
+  .burst.open { animation: burst-open .45s ease-out; }
+  .burst.close { border-color: var(--accent-b); animation: burst-close .45s ease-in; }
+  @keyframes burst-open { from { transform: scale(1); opacity: .9; } to { transform: scale(1.45); opacity: 0; } }
+  @keyframes burst-close { from { transform: scale(1.45); opacity: 0; } to { transform: scale(1); opacity: .9; } }
   .live #talk { background: linear-gradient(135deg, var(--live-a), var(--live-b)); transform: scale(.94); box-shadow: 0 10px 40px -8px rgba(244, 63, 94, .7), inset 0 1px 0 rgba(255,255,255,.25); }
   .stop-mode #talk { background: linear-gradient(135deg, #334155, #1e293b); box-shadow: 0 18px 50px -12px rgba(15, 23, 42, .7); }
   #stop-icon, .stop-mode #talk-icon { display: none; }
@@ -135,6 +141,7 @@
     <div class="talk-wrap" id="talk-wrap">
       <div class="ring r2" id="ring2"></div>
       <div class="ring" id="ring1"></div>
+      <div class="burst" id="burst"></div>
       <button id="talk" aria-label="Hold to talk">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="talk-icon">
           <rect x="9" y="2" width="6" height="12" rx="3"></rect>
@@ -157,6 +164,8 @@
 <script>
 (() => {
   const RATE = 16000, PREROLL_S = 0.3, MAX_S = 60;
+  // Answering a question hands-free ("Listen for my answer automatically" in Settings on the PC).
+  const AUTO_WAIT_S = 8, END_SILENCE_S = 0.8, MIN_SPEECH_S = 0.09;
   const $ = id => document.getElementById(id);
   const body = document.body;
 
@@ -230,6 +239,7 @@
       $('hint').innerHTML = s.question ? '<strong>Tap</strong> an option, or <strong>hold</strong> and say it'
         : s.busy ? '<strong>Tap</strong> to stop' : '<strong>Hold</strong> to talk, let go to send';
     }
+    maybeAutoListen(s);
     const opts = $('options');
     const key = JSON.stringify(s.options);
     if (opts.dataset.key !== key) {
@@ -249,6 +259,9 @@
 
   // ---- microphone ----------------------------------------------------------
   let ctx = null, stream = null, chunks = [], preroll = [], prerollLen = 0, recording = false, recLen = 0, level = 0;
+  let noise = 0.002; // background loudness, for telling when you've stopped talking
+  let auto = null; // set while listening for an answer by itself: { began, speech, quiet } (seconds)
+  let autoAsked = -1; // the question it last listened for, so each question gets one go
   const WORKLET = `class Tap extends AudioWorkletProcessor {
     process(inputs) { const ch = inputs[0] && inputs[0][0]; if (ch) this.port.postMessage(ch.slice(0)); return true; }
   }
@@ -272,7 +285,16 @@
   function onAudio(buf) {
     let sum = 0;
     for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
-    level = level * 0.6 + Math.sqrt(sum / buf.length) * 0.4;
+    const rms = Math.sqrt(sum / buf.length);
+    level = level * 0.6 + rms * 0.4;
+    const speech = rms > Math.max(0.006, noise * 3);
+    noise = Math.max(1e-4, noise + (rms - noise) * (speech ? 0.002 : 0.05));
+    if (recording && auto) {
+      const t = buf.length / ctx.sampleRate;
+      if (speech) { auto.speech += t; auto.quiet = 0; } else auto.quiet += t;
+      if (auto.speech >= MIN_SPEECH_S && auto.quiet >= END_SILENCE_S) { auto = null; release(); }
+      else if (auto.speech < MIN_SPEECH_S && (performance.now() - auto.began) / 1000 > AUTO_WAIT_S) stopAuto();
+    }
     if (recording) {
       chunks.push(buf);
       recLen += buf.length;
@@ -309,12 +331,53 @@
 
   function buzz(ms) { try { navigator.vibrate && navigator.vibrate(ms); } catch {} }
 
+  // Every time the mic opens or closes, however it happened, the button plays the matching ring.
+  function micRing(open) {
+    const b = $('burst');
+    b.className = 'burst';
+    void b.offsetWidth; // restart the animation
+    b.className = 'burst ' + (open ? 'open' : 'close');
+  }
+
+  function micReady() { return !!(ctx && stream && stream.active && ctx.state === 'running'); }
+
+  // A question for a command said on this phone, with auto-listen on: open the mic for the answer. Only while
+  // the page is in front and the mic has been used since it loaded: browsers won't start it without a tap.
+  function maybeAutoListen(s) {
+    if (!s.auto_listen || s.question_id === autoAsked || recording || held || document.hidden || !micReady()) return;
+    autoAsked = s.question_id;
+    startAuto();
+  }
+
+  async function startAuto() {
+    let r;
+    try { r = await api('/api/press'); } catch (err) { showError(err); return; }
+    if (r.result !== 'listening' || held || recording) { render(r); return; }
+    chunks = preroll.slice();
+    recLen = prerollLen;
+    preroll = []; prerollLen = 0;
+    recording = true;
+    auto = { began: performance.now(), speech: 0, quiet: 0 };
+    pressSent = Promise.resolve(true);
+    body.classList.add('live');
+    micRing(true);
+    buzz(20);
+    $('hint').innerHTML = '<strong>Listening…</strong> say your answer';
+  }
+
+  function stopAuto() {
+    // Nobody spoke: close the mic and leave the question up for a tap.
+    cancelRecording();
+    api('/api/stop').then(render).catch(showError);
+  }
+
   talk.addEventListener('pointerdown', async e => {
     e.preventDefault();
     if (held) return;
     held = true;
     try { talk.setPointerCapture(e.pointerId); } catch {}
     buzz(20);
+    if (auto) { auto = null; return; } // already listening for the answer: now it's hold to talk, let go to send
     if (status && status.busy && !status.question) {
       api('/api/press').then(render).catch(showError); // a press while it's working stops it, like Right Ctrl
       return;
@@ -332,6 +395,7 @@
     preroll = []; prerollLen = 0;
     recording = true;
     body.classList.add('live');
+    micRing(true);
     $('hint').innerHTML = '<strong>Listening…</strong> let go to send';
     pressSent = api('/api/press').then(r => {
       if (r.result !== 'listening') {
@@ -344,6 +408,8 @@
   });
 
   function cancelRecording() {
+    if (recording) micRing(false);
+    auto = null;
     recording = false;
     chunks = []; recLen = 0;
     body.classList.remove('live');

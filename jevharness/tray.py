@@ -41,6 +41,8 @@ class Tray:
                 pystray.MenuItem("Dry run (show, don't act)", lambda: app.ui(app.toggle_dry_run), checked=lambda _: app.settings.dry_run),
                 pystray.MenuItem("YOLO mode (decide everything itself)", lambda: app.ui(app.toggle_yolo),
                                  checked=lambda _: app.settings.yolo),
+                pystray.MenuItem("Listen for wake word", lambda: app.ui(app.toggle_wake),
+                                 checked=lambda _: app.settings.wake_enabled),
                 pystray.MenuItem("Run script", pystray.Menu(lambda: self._script_items())),
                 pystray.MenuItem("Start with Windows", lambda: app.ui(app.toggle_autostart),
                                  checked=lambda _: autostart.is_enabled()),

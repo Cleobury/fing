@@ -3,6 +3,7 @@
 Threads:
   main       Tk event loop: overlay, highlight, settings dialog. Other threads post work via `ui()`.
   keyboard   global hook for Right Ctrl push-to-talk (must return quickly).
+  listener   hands-free listening: the wake word, and answering questions without Right Ctrl (listen.py).
   ocr        screen capture + OCR, started the moment Right Ctrl goes down.
   work       transcription -> Jev -> action, one command at a time.
   tray       pystray message loop.
@@ -29,7 +30,7 @@ import keyboard
 import numpy as np
 from typesafe_sdk import TypeSafeAPIError, TypeSafeAuthenticationError, TypeSafeError
 
-from . import autostart, executor
+from . import autostart, executor, wakephrase
 from .apps import App as InstalledApp
 from .apps import load_start_apps
 from .decide import (
@@ -49,6 +50,7 @@ from .desktop import (
     wait_until_settled,
 )
 from .journal import Journal, describe_change
+from .listen import Listener
 from .scripts import Script, breakdown_key, check_of, load_scripts, save_scripts, split_lines, wait_of, write_report
 from .llm import PROVIDERS, Planner
 from .search import valid_hotkey
@@ -78,6 +80,8 @@ HINT_WORDS = 40
 RECENT_S = 120  # how long earlier actions count as context for a new command
 MAX_NAV_HOPS = 3  # clicks to find where a step can be done (e.g. Library → Store) before giving up
 ANSWER_TIMEOUT_S = 30  # how long a clarifying question waits for a spoken answer
+AUTO_LISTEN_S = 8  # "Listen for my answer automatically": how long the mic waits for you to start talking
+BEEP_S = 0.3  # …after the question's beep, so the mic doesn't hear it
 STUCK_ROUNDS = 3  # rounds in a row without progress before asking the user what to do next
 CHECK_IN_EVERY = 20  # actions beyond what was said between "keep going?" check-ins
 YOLO_MAX_EXTRA = 30  # YOLO mode has no check-ins: stop after this many actions beyond what was said
@@ -184,9 +188,16 @@ class App:
         self.tray: Tray | None = None
         self.perception: Perception | None = None
         self.recorder: Recorder | None = None
+        self.listener: Listener | None = None
         self.model_ready = False
         self.recording = False
         self._phone_recording = False  # the current recording is coming from the phone remote, not the mic
+        self._handsfree = False  # the current recording is the listener's (wake word or auto-listen), not Right Ctrl's
+        self._handsfree_token = 0  # which listener capture that is
+        self._source = "key"  # what started the current recording: "key", "phone", "wake" or "auto"
+        self._command_source = "key"  # …and the command being worked on; its questions are answered the same way
+        self._phone_auto_listen = False  # a question from a phone command: the phone page opens its own mic
+        self._question_n = 0  # counts questions, so the phone auto-listens once per question
         self._record_t = 0.0
         self.busy = False
         self._ocr_future: Future | None = None
@@ -237,7 +248,7 @@ class App:
             self.status("warn", "CUDA unavailable: transcribing on CPU (slow)", 5000)
         elif self.model_ready and self.decider:
             # Say how to use it once, then shrink to the idle dot.
-            self.overlay.show(self.overlay.idle_state, "Jev ready · hold Right Ctrl to speak" + self._dry_run_note(), 5000)
+            self.overlay.show(self.overlay.idle_state, "Jev ready · " + self._talk_hint() + self._dry_run_note(), 5000)
         self.remote: RemoteServer | None = None
         self._apply_remote()
         self._pump()
@@ -282,6 +293,11 @@ class App:
             return "Add TypeSafe API key (right-click tray icon)"
         return ""
 
+    def _talk_hint(self) -> str:
+        if self.settings.wake_enabled:
+            return f"hold Right Ctrl or say “{self.settings.wake_phrase.strip().capitalize()}”"
+        return "hold Right Ctrl to speak"
+
     def _dry_run_note(self) -> str:
         return (" · dry run" if self.settings.dry_run else "") + (" · YOLO" if self.settings.yolo else "")
 
@@ -293,7 +309,7 @@ class App:
                                    else "yolo" if self.settings.yolo else "idle")
         if self.overlay.state in ("idle", "loading", "warn") and not self.recording and not self.busy:
             self.overlay.show(self.overlay.idle_state, self.overlay.idle_text)
-        self._last_status = self.overlay.idle_text or "Ready · hold Right Ctrl to speak" + self._dry_run_note()
+        self._last_status = self.overlay.idle_text or "Ready · " + self._talk_hint() + self._dry_run_note()
         self.tray.refresh()
 
     def _load_model(self) -> None:
@@ -305,6 +321,9 @@ class App:
             self.perception = Perception()
             self.perception.use_controls = self.settings.read_controls
             self.recorder = Recorder(self.settings.mic_device)
+            self.listener = Listener(self.transcriber, self._wake_allowed, self._on_wake, self._on_heard)
+            self.recorder.add_listener(self.listener.feed)
+            self._apply_listener()
             self.model_ready = True
             log.info("Ready (whisper on %s)", self.transcriber.device)
         except Exception as e:
@@ -389,6 +408,7 @@ class App:
         self._apply_remote()
         if self.recorder:
             self.recorder.set_device(self.settings.mic_device)
+        self._apply_listener()
         if self.perception:
             self.perception.use_controls = self.settings.read_controls
         self._rebuild_decider()
@@ -422,6 +442,16 @@ class App:
         self.overlay.show(self.overlay.idle_state, "YOLO mode on: I'll decide everything myself" if self.settings.yolo
                           else "YOLO mode off: I'll ask when unsure", 2500)
 
+    def toggle_wake(self) -> None:
+        """Tray menu → Listen for wake word."""
+        self.settings.wake_enabled = not self.settings.wake_enabled
+        self.settings.save()
+        self._apply_listener()
+        self._refresh_idle()
+        on = self.settings.wake_enabled
+        self.overlay.show(self.overlay.idle_state, f"Listening for “{self.settings.wake_phrase.strip().capitalize()}”"
+                          if on else "Not listening for the wake word", 2500)
+
     def toggle_dry_run(self) -> None:
         self.settings.dry_run = not self.settings.dry_run
         self.settings.save()
@@ -443,6 +473,17 @@ class App:
     # ---- push-to-talk ----------------------------------------------------
 
     def _on_key(self, e: keyboard.KeyboardEvent) -> None:
+        if self._handsfree and e.event_type == keyboard.KEY_DOWN and e.name in (HOTKEY, "esc"):
+            # While listening hands-free: Right Ctrl switches to push-to-talk; Esc stops listening (and stops
+            # the command too, if it was answering one of its questions).
+            self._end_handsfree()
+            if e.name == HOTKEY:
+                self._start_recording()
+            elif self.busy:
+                self._cancel.set()
+            else:
+                self._show_waiting()
+            return
         if self.busy and not self._executing and e.event_type == keyboard.KEY_DOWN and not self.recording:
             # Esc stops a running command; Right Ctrl does too, unless we're waiting for an answer to a question.
             if e.name == "esc" or (e.name == HOTKEY and self._question is None):
@@ -452,15 +493,17 @@ class App:
             if time.perf_counter() - self._record_t < PHONE_TIMEOUT_S:
                 return  # the phone is talking; its own release ends the recording
             self.recording = self._phone_recording = False  # the phone never let go (lost Wi-Fi?)
+            self._mic_closed()
         if e.name == HOTKEY:
             if e.event_type == keyboard.KEY_DOWN and not self.recording:
                 self._start_recording()
-            elif e.event_type == keyboard.KEY_UP and self.recording:
+            elif e.event_type == keyboard.KEY_UP and self.recording and not self._handsfree:
                 self._stop_recording()
-        elif self.recording and e.event_type == keyboard.KEY_DOWN:
+        elif self.recording and not self._handsfree and e.event_type == keyboard.KEY_DOWN:
             # Right Ctrl was used as part of a shortcut (e.g. RCtrl+C), not push-to-talk.
             self.recording = False
             self.recorder.stop()
+            self._mic_closed()
             self._show_waiting()
 
     def _show_waiting(self) -> None:
@@ -470,7 +513,17 @@ class App:
         else:
             self.status(self.overlay.idle_state, self.overlay.idle_text)
 
-    def _start_recording(self, phone: bool = False) -> bool:
+    def _mic_opened(self) -> None:
+        """Every way the mic opens comes through here, so each one plays the indicator's opening ring."""
+        self.ui(self.overlay.mic_opened)
+
+    def _mic_closed(self) -> None:
+        """…and every way it closes comes through here, for the closing ring."""
+        self.ui(self.overlay.mic_closed)
+
+    def _start_recording(self, source: str = "key") -> bool:
+        """Start listening: "key" (Right Ctrl, the PC mic), "phone" (the phone records and uploads the clip),
+        "wake" or "auto" (the hands-free listener records it; see listen.py)."""
         if self.busy and self._question is None:
             return False
         if not self.model_ready:
@@ -480,24 +533,31 @@ class App:
             self.status("error", "No TypeSafe API key: right-click the tray icon → Settings", 4000)
             return False
         self.recording = True
-        self._phone_recording = phone
+        self._source = source
+        self._phone_recording = source == "phone"
+        self._handsfree = source in ("wake", "auto")
         self._record_t = time.perf_counter()
-        if not phone:
+        if source == "key":
             self.recorder.start()
         if self._question is None:
             # OCR runs while the user is still speaking, so it's ready by the time they let go.
             self._ocr_future = self._ocr_pool.submit(self.perception.capture, [self.overlay.rect])
-        self.status("listening", "Listening on your phone…" if phone else "Listening…")
+        if source == "auto":
+            self.status("listening", self._question_prompt())  # keep the options in view while it listens
+        else:
+            self.status("listening", "Listening on your phone…" if source == "phone" else "Listening…")
+        self._mic_opened()
         return True
 
-    def _stop_recording(self, phone_audio: np.ndarray | None = None) -> None:
-        self.recording = self._phone_recording = False
-        audio = self.recorder.stop() if phone_audio is None else phone_audio
+    def _stop_recording(self, given: np.ndarray | None = None) -> None:
+        """End the recording and use it: the PC mic's (Right Ctrl let go), or a clip the phone or the hands-free
+        listener recorded (`given`)."""
+        source = self._source
+        self.recording = self._phone_recording = self._handsfree = False
+        audio = self.recorder.stop() if given is None else given
+        self._mic_closed()
         if len(audio) < MIN_AUDIO_S * SAMPLE_RATE:
-            if phone_audio is not None:
-                self._show_waiting()
-                return
-            if self._question is None and time.perf_counter() - self._record_t >= MIN_AUDIO_S + 0.5:
+            if given is None and self._question is None and time.perf_counter() - self._record_t >= MIN_AUDIO_S + 0.5:
                 # Held long enough to be a command, but the mic gave nothing (e.g. just after waking from sleep).
                 self.status("warn", "No sound from the microphone; reconnecting, try again", 3000)
                 return
@@ -508,9 +568,62 @@ class App:
             self.status("thinking", "Got it…")
             return
         self.busy = True
+        self._command_source = source
         self._cancel.clear()
         self._marked_done = False
         self._work_pool.submit(self._handle_command, audio, self._ocr_future, time.perf_counter())
+
+    # ---- hands-free (see listen.py; the listener calls these from its own thread) ----
+
+    def _apply_listener(self) -> None:
+        if self.listener:
+            s = self.settings
+            self.listener.phrase = s.wake_phrase.strip() or wakephrase.DEFAULT_PHRASE
+            self.listener.sensitivity = s.wake_sensitivity
+            self.listener.wake_enabled = s.wake_enabled
+
+    def _wake_allowed(self) -> bool:
+        """The wake word works while Jev is idle, or to answer a question; not while it's carrying out a command,
+        so nothing it plays or says can set it off."""
+        return (self.model_ready and self.decider is not None and not self.recording
+                and (not self.busy or self._question is not None))
+
+    def _on_wake(self, token: int) -> bool:
+        """The wake phrase was heard: start a hands-free recording (the listener records it)."""
+        if not self._wake_allowed() or not self._start_recording("wake"):
+            return False
+        self._handsfree_token = token
+        winsound.MessageBeep(winsound.MB_OK)
+        return True
+
+    def _on_heard(self, token: int, audio: np.ndarray | None) -> None:
+        """A hands-free recording finished; None means nobody spoke before it gave up."""
+        if token != self._handsfree_token or not self._handsfree:
+            return
+        if audio is None:
+            self.recording = self._handsfree = False
+            self._mic_closed()
+            self._show_waiting()
+            return
+        self._stop_recording(audio)
+
+    def _end_handsfree(self) -> None:
+        """Drop a hands-free recording without using it (Right Ctrl took over, or the question was answered)."""
+        if self.listener:
+            self.listener.cancel()
+        if self._handsfree:
+            self.recording = self._handsfree = False
+            self._mic_closed()
+
+    def _listen_for_answer(self) -> None:
+        """Continuous conversation: open the mic for the answer to the question just asked."""
+        if self.listener is None or self.recording:
+            return
+        token = self.listener.capture(AUTO_LISTEN_S, delay_s=BEEP_S)
+        if self._start_recording("auto"):
+            self._handsfree_token = token
+        else:
+            self.listener.cancel()
 
     # ---- phone remote (see remote.py; called from its server threads) ----
 
@@ -536,9 +649,11 @@ class App:
         if self.busy and self._question is None:
             self._cancel.set()
             return "stopped"
+        if self._handsfree:
+            self._end_handsfree()  # the phone takes over from listening hands-free on the PC
         if self.recording and not self._phone_recording:
             return "busy"  # Right Ctrl is being held on the PC
-        return "listening" if self._start_recording(phone=True) else "unavailable"
+        return "listening" if self._start_recording("phone") else "unavailable"
 
     def remote_release(self, audio: np.ndarray) -> None:
         if self._phone_recording:
@@ -547,6 +662,7 @@ class App:
     def remote_stop(self) -> None:
         if self._phone_recording:
             self.recording = self._phone_recording = False
+            self._mic_closed()
             self._show_waiting()
         elif self.busy:
             self._cancel.set()
@@ -566,6 +682,9 @@ class App:
             "ready": bool(self.model_ready and self.decider),
             "question": q.prompt if q else None,
             "options": [label for label, _ in self._question_options] if q else [],
+            # The phone opens its own mic for the answer (once per question_id), if it was asked there.
+            "auto_listen": bool(q) and self._phone_auto_listen and not self.recording,
+            "question_id": self._question_n,
         }
 
     # ---- command pipeline ------------------------------------------------
@@ -607,6 +726,10 @@ class App:
         t = time.perf_counter()
         hints = list(dict.fromkeys(e.text for e in screen.elements if len(e.text.split()) <= 3))[:HINT_WORDS]
         command = self.transcriber.transcribe(audio, hints)
+        entry["trigger"] = self._command_source
+        if self._command_source == "wake":
+            heard, command = command, wakephrase.strip(self.settings.wake_phrase, command, self.settings.wake_sensitivity)
+            entry["heard"] = heard
         entry.update(stt_ms=round((time.perf_counter() - t) * 1000), command=command)
         if not command:
             self.status("warn", "Didn't catch that", 2500)
@@ -1278,6 +1401,7 @@ class App:
             self.status("error", f'No script called "{name}"', 3000)
             return
         self.busy = True
+        self._command_source = "tray"  # its questions are answered on the PC
         self._cancel.clear()
         self._marked_done = False
         entry: dict = {"time": datetime.now().isoformat(timespec="seconds"), "command": f'(run script "{name}")'}
@@ -1367,6 +1491,12 @@ class App:
         winsound.MessageBeep(winsound.MB_ICONASTERISK)
         self.ui(self.highlight.mark, q.rects, None)
         self.status("question", self._question_prompt() if not label else label + self._question_prompt())
+        self._question_n += 1
+        if self.settings.auto_listen_answers:
+            if self._command_source == "phone":
+                self._phone_auto_listen = True  # the phone page opens its own mic (web/index.html)
+            else:
+                self._listen_for_answer()
         # Number keys answer the question: swallow just those keys (not End/arrows, which share numpad scan
         # codes) so they don't also type into the app underneath.
         key_filter = keyboard.hook(self._answer_key_filter, suppress=True)
@@ -1384,6 +1514,9 @@ class App:
                     pass
         finally:
             keyboard.unhook(key_filter)
+            self._phone_auto_listen = False
+            if self._handsfree:
+                self._end_handsfree()  # answered with a key, cancelled or timed out while listening
             self._question = None
             self.ui(self.highlight.hide)
 
@@ -1393,6 +1526,8 @@ class App:
             record["answer"] = f"key {idx + 1}"
         else:
             answer = self.transcriber.transcribe(value, [clean_span(o) for o, _ in options])
+            if self.settings.wake_enabled:  # "Hey Jev, two"
+                answer = wakephrase.strip(self.settings.wake_phrase, answer, self.settings.wake_sensitivity)
             record["answer"] = answer
             if not answer:
                 self._fail("Didn't catch the answer, so I stopped")

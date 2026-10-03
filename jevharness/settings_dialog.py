@@ -2,6 +2,7 @@
 
 import logging
 import threading
+import time
 import tkinter as tk
 from dataclasses import replace
 from tkinter import colorchooser, ttk
@@ -9,7 +10,7 @@ from tkinter import colorchooser, ttk
 import keyboard
 from typesafe_sdk import TypeSafeAPIError, TypeSafeAuthenticationError, TypeSafeError
 
-from . import autostart, remote, search
+from . import autostart, remote, search, wakephrase
 from .decide import Decider
 from .llm import PROVIDERS, Planner
 from .overlay import DEFAULT_BG, DEFAULT_DOTS, DEFAULT_FG
@@ -73,6 +74,7 @@ class SettingsDialog:
         self._build_planner_tab(tabs, s)
         self._build_search_tab(tabs, s)
         self._build_phone_tab(tabs, s)
+        self._build_handsfree_tab(tabs, s)
         self._build_scripts_tab(tabs)
         self._build_indicator_tab(tabs, s)
 
@@ -280,6 +282,100 @@ class SettingsDialog:
             if current:
                 msg += f". “{current}” can't be used for planning, so I picked {models[0]}"
         self.status.set(msg)
+
+    # ---- Hands-free -------------------------------------------------------------------
+
+    _RATING = {"weak": ("Weak: ", "#b06000"), "ok": ("OK: ", "#5f6368"), "good": ("Good ✓", "#188038")}
+
+    def _build_handsfree_tab(self, tabs, s) -> None:
+        f = self._tab(tabs, "Hands-free")
+        ttk.Label(f, text="Say a phrase to start talking to Jev, instead of holding Right Ctrl. "
+                          "Listening happens on this PC; nothing is sent anywhere until you give a command.",
+                  foreground="#5f6368", wraplength=480).grid(row=0, column=0, columnspan=3, sticky="w")
+        self.wake_on = tk.BooleanVar(value=s.wake_enabled)
+        self.wake_phrase = tk.StringVar(value=s.wake_phrase)
+        self.wake_sens = tk.DoubleVar(value=s.wake_sensitivity)
+        self.auto_listen = tk.BooleanVar(value=s.auto_listen_answers)
+        ttk.Checkbutton(f, text="Listen for a wake word", variable=self.wake_on).grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        _row(f, 2, "Wake phrase")
+        ttk.Entry(f, textvariable=self.wake_phrase, width=30).grid(row=2, column=1, sticky="w", pady=(8, 0))
+        self.wake_test_btn = ttk.Button(f, text="Test", command=self._toggle_wake_test)
+        self.wake_test_btn.grid(row=2, column=2, sticky="w", padx=(8, 0), pady=(8, 0))
+        self.wake_rating = ttk.Label(f, wraplength=360, justify="left")
+        self.wake_rating.grid(row=3, column=1, columnspan=2, sticky="w", pady=(4, 0))
+        self.wake_suggest = ttk.Frame(f)
+        self.wake_suggest.grid(row=4, column=1, columnspan=2, sticky="w", pady=(4, 0))
+        _row(f, 5, "Sensitivity")
+        sens = ttk.Frame(f)
+        sens.grid(row=5, column=1, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(sens, text="Fewer false triggers", foreground="#5f6368").pack(side="left")
+        ttk.Scale(sens, from_=0.0, to=1.0, variable=self.wake_sens, length=160).pack(side="left", padx=6)
+        ttk.Label(sens, text="Catches more", foreground="#5f6368").pack(side="left")
+        self.wake_test_text = tk.StringVar(value="Test listens without triggering anything, and counts how often the "
+                                                 "phrase would have gone off.")
+        ttk.Label(f, textvariable=self.wake_test_text, foreground="#5f6368", wraplength=480, justify="left").grid(
+            row=6, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Separator(f).grid(row=7, column=0, columnspan=3, sticky="we", pady=(14, 0))
+        ttk.Checkbutton(f, text="Listen for my answer automatically when Jev asks a question",
+                        variable=self.auto_listen).grid(row=8, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        ttk.Label(f, foreground="#5f6368", wraplength=480, justify="left", text=(
+            "The mic opens by itself after the question's beep and closes when you stop talking; number keys still "
+            "work. If you gave the command from your phone, the phone listens instead, as long as its page is open "
+            "and you've used its mic since opening it.")).grid(row=9, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self._wake_test_started = 0.0
+        self._wake_test_heard = self._wake_test_hits = 0
+        self.wake_phrase.trace_add("write", lambda *_: self._wake_phrase_changed())
+        self._wake_phrase_changed()
+
+    def _wake_phrase_changed(self) -> None:
+        """Rate the phrase as it's typed, and offer stronger ones when it's weak."""
+        phrase = self.wake_phrase.get()
+        st = wakephrase.strength(phrase)
+        prefix, colour = self._RATING[st.rating]
+        self.wake_rating.configure(text=prefix + st.message, foreground=colour)
+        for child in self.wake_suggest.winfo_children():
+            child.destroy()
+        for text in st.suggestions:
+            ttk.Button(self.wake_suggest, text=text, command=lambda t=text: self.wake_phrase.set(t)).pack(
+                side="left", padx=(0, 6))
+        listener = self.app.listener
+        if listener and listener.on_test:
+            listener.test_phrase = phrase.strip() or wakephrase.DEFAULT_PHRASE
+
+    def _toggle_wake_test(self) -> None:
+        listener = self.app.listener
+        if listener is None:
+            self.wake_test_text.set("The microphone isn't ready yet.")
+            return
+        if listener.on_test:
+            self._stop_wake_test()
+            return
+        self._wake_test_started = time.monotonic()
+        self._wake_test_heard = self._wake_test_hits = 0
+        listener.test_phrase = self.wake_phrase.get().strip() or wakephrase.DEFAULT_PHRASE
+        listener.on_test = lambda heard, score: self.app.ui(self._wake_heard, heard, score)
+        self.wake_test_btn.configure(text="Stop test")
+        self.wake_test_text.set("Testing: say the phrase a few times, then talk normally or play a video. "
+                                "Nothing will be triggered.")
+
+    def _wake_heard(self, heard: str, score: float) -> None:
+        """Test: something was heard (Tk thread)."""
+        if not self.win.winfo_exists() or not (self.app.listener and self.app.listener.on_test):
+            return
+        hit = score >= wakephrase.threshold(self.wake_sens.get())
+        self._wake_test_heard += 1
+        self._wake_test_hits += hit
+        minutes = (time.monotonic() - self._wake_test_started) / 60
+        verdict = "would trigger ✓" if hit else "wouldn't trigger"
+        self.wake_test_text.set(f"Heard “{heard}”: {score:.0%} match, {verdict}.\n"
+                                f"{self._wake_test_hits} of {self._wake_test_heard} things heard would have "
+                                f"triggered, in {minutes:.1f} min.")
+
+    def _stop_wake_test(self) -> None:
+        if self.app.listener:
+            self.app.listener.on_test = None
+        self.wake_test_btn.configure(text="Test")
 
     # ---- Phone remote -----------------------------------------------------------------
 
@@ -741,6 +837,9 @@ class SettingsDialog:
         if remote_port is None:
             self.status.set("The phone port must be a number from 1024 to 65535.")
             return
+        if self.wake_on.get() and not wakephrase.words(self.wake_phrase.get()):
+            self.status.set("Type a wake phrase on the Hands-free tab, or turn the wake word off.")
+            return
         hotkey = self.hotkey.get().strip().lower() or search.DEFAULT_HOTKEY
         if self.powertoys.get() and not search.valid_hotkey(hotkey):
             self.status.set(f"“{hotkey}” isn't a shortcut I recognise. Try Record, or e.g. “left alt+space”.")
@@ -753,6 +852,10 @@ class SettingsDialog:
         s.remote_pin = self.remote_pin.get()
         s.remote_port = remote_port
         s.mic_device = "" if self.mic.get() == _SYSTEM_DEFAULT_MIC else self.mic.get()
+        s.wake_enabled = self.wake_on.get()
+        s.wake_phrase = self.wake_phrase.get().strip() or s.wake_phrase
+        s.wake_sensitivity = round(min(1.0, max(0.0, float(self.wake_sens.get()))), 2)
+        s.auto_listen_answers = self.auto_listen.get()
         s.yolo = self.yolo.get()
         s.yolo_allow_irreversible = not self.yolo_irreversible.get()
         s.min_action_prob = min(1.0, max(0.0, min_action))
@@ -798,5 +901,6 @@ class SettingsDialog:
         self._destroy()
 
     def _destroy(self) -> None:
+        self._stop_wake_test()
         self.win.destroy()
         self.app.settings_dialog = None

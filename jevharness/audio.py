@@ -17,6 +17,7 @@ import collections
 import logging
 import threading
 import time
+from typing import Callable
 
 import numpy as np
 import sounddevice as sd
@@ -65,8 +66,14 @@ class Recorder:
         self._closed = threading.Event()
         self._reopen_now = threading.Event()
         self._force_reopen = False
+        self._listeners: list[Callable[[np.ndarray, int], None]] = []
         self._connect()
         threading.Thread(target=self._watch, daemon=True, name="mic-watchdog").start()
+
+    def add_listener(self, fn: Callable[[np.ndarray, int], None]) -> None:
+        """Also hand every block, with its sample rate, to fn (e.g. the wake word listener). It's called on
+        PortAudio's audio thread, so it must return at once."""
+        self._listeners.append(fn)
 
     def set_device(self, device: str) -> None:
         """Switch to another input device by name (blank = the system default)."""
@@ -167,6 +174,12 @@ class Recorder:
         with self._lock:
             self._last_audio_t = time.monotonic()
             (self._chunks if self._recording else self._preroll).append(chunk)
+            rate = self._rate
+        for fn in self._listeners:
+            try:
+                fn(chunk, rate)
+            except Exception:
+                log.debug("A mic listener failed", exc_info=True)
 
     def start(self) -> None:
         healthy = self._healthy()

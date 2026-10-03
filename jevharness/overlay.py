@@ -86,6 +86,8 @@ class Overlay:
         self.hwnd = _make_passive(self.win)
         self.state = "loading"
         self._pulse_on = False
+        self._ring_job = None  # the mic open/close ring animation in progress
+        self._dot_at = (self.DOT // 2, self.DOT // 2, 9)  # the dot's centre, and the largest ring that fits around it
         self._revert_job = None
         self._clickable = False
         self._hidden = False  # hidden because a fullscreen app is in front
@@ -144,6 +146,7 @@ class Overlay:
             dot_y = h // 2
             c.create_oval(0, 0, w, h, fill=self.bg, outline=self.bg)
             c.create_oval(5, 5, w - 5, h - 5, fill=self.dots[state], outline="", tags="dot")
+            self._dot_at = (w // 2, h // 2, w // 2 - 1)
         c.configure(width=w, height=h)
         x, y = self._place(w, dot_y, ax, ay, align)
         self.win.geometry(f"{w}x{h}{x:+d}{y:+d}")
@@ -187,6 +190,7 @@ class Overlay:
         self._round_rect(0, 0, w, h, radius)
         dot_x = w - self._DOT_X if mirrored else self._DOT_X
         c.create_oval(dot_x - 5, dot_y - 5, dot_x + 5, dot_y + 5, fill=self.dots[state], outline="", tags="dot")
+        self._dot_at = (dot_x, dot_y, min(12, dot_y - 2, h - dot_y - 2))  # 12: clear of the text
         text_x = 14 + extra if mirrored else self.PAD_X  # mirrored: dot on the right, text still left-aligned
         for i, row in enumerate(rows):
             c.create_text(text_x, centre(i), text=row, anchor="w", fill=self.fg, font=self.font)
@@ -317,6 +321,36 @@ class Overlay:
         style = _user32.GetWindowLongW(self.hwnd, -20)
         _user32.SetWindowLongW(self.hwnd, -20, (style & ~0x20) if on else (style | 0x20))
         self._clickable = on
+
+    RING_FRAMES = 10  # the mic open/close animation: 10 frames, 30 ms apart
+    RING_MS = 30
+
+    def mic_opened(self) -> None:
+        """The mic just opened (whatever opened it): a ring grows out of the dot and fades."""
+        self._ring(opening=True)
+
+    def mic_closed(self) -> None:
+        """The mic just closed: a ring shrinks back into the dot."""
+        self._ring(opening=False)
+
+    def _ring(self, opening: bool, frame: int = 0) -> None:
+        if frame == 0 and self._ring_job:
+            self.root.after_cancel(self._ring_job)
+        self._ring_job = None
+        c = self.canvas
+        c.delete("ring")
+        if frame >= self.RING_FRAMES:
+            return
+        x, y, biggest = self._dot_at
+        t = frame / (self.RING_FRAMES - 1)
+        grow = t if opening else 1 - t
+        r = 6 + (biggest - 6) * grow
+        # Opening fades out as it grows; closing fades in as it shrinks onto the dot.
+        colour = self.dots["listening"] if opening else self.dots.get(self.state, self.dots["idle"])
+        colour = _mix(colour, self.bg, t if opening else 1 - t)
+        c.create_oval(x - r, y - r, x + r, y + r, outline=colour, width=2, tags="ring")
+        c.tag_raise("dot")
+        self._ring_job = self.root.after(self.RING_MS, lambda: self._ring(opening, frame + 1))
 
     def _pulse(self) -> None:
         if self.state == "listening":
