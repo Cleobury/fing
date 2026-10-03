@@ -133,8 +133,10 @@ It runs without a console window. To see its log output while debugging, run it 
 | Say **"Hey Jev"** (if the wake word is on) | Same as holding Right Ctrl: it listens until you stop talking. "Hey Jev, open Steam" works in one breath, or pause after "Hey Jev" (see below) |
 | Tray icon → **Listen for wake word** | Turns the wake word on or off |
 
-The dot on the indicator plays a ring whenever the microphone opens (a ring grows out of it) and closes (a ring
-shrinks into it), however it opened: Right Ctrl, the phone, the wake word or a question listening for its answer.
+Whenever the microphone opens, however it opened (Right Ctrl, the phone, the wake word or a question listening for
+its answer), the indicator's dot pops and two rings ripple out of it, with a rising chime; when it closes, the
+rings fold back in, with a falling chime. The phone's button does the same. Settings → Hands-free turns the
+chimes off.
 
 Things you can say:
 

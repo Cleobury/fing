@@ -69,12 +69,22 @@
     transition: transform .15s ease, box-shadow .3s, background .3s;
   }
   #talk svg { width: 34%; height: 34%; }
-  /* The mic opening (a ring bursts out of the button) and closing (a ring shrinks back into it). */
-  .burst { position: absolute; inset: 11%; border-radius: 50%; border: 3px solid var(--live-a); opacity: 0; pointer-events: none; }
-  .burst.open { animation: burst-open .45s ease-out; }
-  .burst.close { border-color: var(--accent-b); animation: burst-close .45s ease-in; }
-  @keyframes burst-open { from { transform: scale(1); opacity: .9; } to { transform: scale(1.45); opacity: 0; } }
-  @keyframes burst-close { from { transform: scale(1.45); opacity: 0; } to { transform: scale(1); opacity: .9; } }
+  /* The mic opening (the button pops, a glow swells and two rings ripple out) and closing (two rings fold back
+     into the button, which settles with a small bounce). */
+  .burst { position: absolute; inset: 11%; border-radius: 50%; border: 4px solid var(--live-a); opacity: 0; pointer-events: none; }
+  .burst.glow { border: none; background: radial-gradient(circle, rgba(244, 63, 94, .45), transparent 70%); }
+  .burst.open { animation: burst-open .75s cubic-bezier(.2, .8, .2, 1) backwards; }
+  .burst.glow.open { animation: glow-open .6s ease-out backwards; }
+  #burst2.open { animation-delay: .16s; border-width: 2px; }
+  .burst.close { border-color: var(--accent-b); animation: burst-close .5s cubic-bezier(.6, 0, .9, .4) backwards; }
+  #burst2.close { animation-delay: .12s; border-width: 2px; }
+  .burst.glow.close { animation: none; }
+  #talk.pop { animation: talk-pop .35s ease-out; }
+  #talk.settle { animation: talk-pop .3s ease-out .55s; }
+  @keyframes burst-open { from { transform: scale(1); opacity: .95; } to { transform: scale(1.6); opacity: 0; } }
+  @keyframes glow-open { from { transform: scale(.9); opacity: .9; } to { transform: scale(1.5); opacity: 0; } }
+  @keyframes burst-close { from { transform: scale(1.6); opacity: 0; } to { transform: scale(1); opacity: .9; } }
+  @keyframes talk-pop { 40% { transform: scale(1.07); } }
   .live #talk { background: linear-gradient(135deg, var(--live-a), var(--live-b)); transform: scale(.94); box-shadow: 0 10px 40px -8px rgba(244, 63, 94, .7), inset 0 1px 0 rgba(255,255,255,.25); }
   .stop-mode #talk { background: linear-gradient(135deg, #334155, #1e293b); box-shadow: 0 18px 50px -12px rgba(15, 23, 42, .7); }
   #stop-icon, .stop-mode #talk-icon { display: none; }
@@ -141,7 +151,9 @@
     <div class="talk-wrap" id="talk-wrap">
       <div class="ring r2" id="ring2"></div>
       <div class="ring" id="ring1"></div>
+      <div class="burst glow" id="glow"></div>
       <div class="burst" id="burst"></div>
+      <div class="burst" id="burst2"></div>
       <button id="talk" aria-label="Hold to talk">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="talk-icon">
           <rect x="9" y="2" width="6" height="12" rx="3"></rect>
@@ -165,7 +177,7 @@
 (() => {
   const RATE = 16000, PREROLL_S = 0.3, MAX_S = 60;
   // Answering a question hands-free ("Listen for my answer automatically" in Settings on the PC).
-  const AUTO_WAIT_S = 8, END_SILENCE_S = 0.8, MIN_SPEECH_S = 0.09;
+  const AUTO_WAIT_S = 8, END_SILENCE_S = 0.8, MIN_SPEECH_S = 0.09, CHIME_MS = 400;
   const $ = id => document.getElementById(id);
   const body = document.body;
 
@@ -289,6 +301,7 @@
     level = level * 0.6 + rms * 0.4;
     const speech = rms > Math.max(0.006, noise * 3);
     noise = Math.max(1e-4, noise + (rms - noise) * (speech ? 0.002 : 0.05));
+    if (recording && auto && performance.now() - auto.began < CHIME_MS) return; // its own chime, not your answer
     if (recording && auto) {
       const t = buf.length / ctx.sampleRate;
       if (speech) { auto.speech += t; auto.quiet = 0; } else auto.quiet += t;
@@ -333,10 +346,34 @@
 
   // Every time the mic opens or closes, however it happened, the button plays the matching ring.
   function micRing(open) {
-    const b = $('burst');
-    b.className = 'burst';
-    void b.offsetWidth; // restart the animation
-    b.className = 'burst ' + (open ? 'open' : 'close');
+    for (const id of ['glow', 'burst', 'burst2']) {
+      const b = $(id), base = id === 'glow' ? 'burst glow' : 'burst';
+      b.className = base;
+      void b.offsetWidth; // restart the animation
+      b.className = base + (open ? ' open' : ' close');
+    }
+    talk.classList.remove('pop', 'settle');
+    void talk.offsetWidth;
+    talk.classList.add(open ? 'pop' : 'settle');
+    chime(open ? [[0, 1046.5, .8], [.07, 1568, 1]] : [[0, 1568, .7], [.07, 1046.5, .6]]);
+  }
+
+  // The same soft two-note chimes as the PC (sounds.py): rising when the mic opens, falling when it closes.
+  function chime(notes) {
+    if (!ctx || ctx.state !== 'running') return;
+    const t0 = ctx.currentTime + 0.01;
+    for (const [at, freq, loud] of notes) {
+      for (const [mult, part] of [[1, 1], [2, .25], [3, .08]]) {
+        const osc = ctx.createOscillator(), gain = ctx.createGain();
+        osc.frequency.value = freq * mult;
+        gain.gain.setValueAtTime(0, t0 + at);
+        gain.gain.linearRampToValueAtTime(0.12 * loud * part, t0 + at + 0.006);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t0 + at + 0.4);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(t0 + at);
+        osc.stop(t0 + at + 0.42);
+      }
+    }
   }
 
   function micReady() { return !!(ctx && stream && stream.active && ctx.state === 'running'); }

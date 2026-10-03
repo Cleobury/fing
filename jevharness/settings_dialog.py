@@ -296,6 +296,7 @@ class SettingsDialog:
         self.wake_phrase = tk.StringVar(value=s.wake_phrase)
         self.wake_sens = tk.DoubleVar(value=s.wake_sensitivity)
         self.auto_listen = tk.BooleanVar(value=s.auto_listen_answers)
+        self.mic_sounds = tk.BooleanVar(value=s.mic_sounds)
         ttk.Checkbutton(f, text="Listen for a wake word", variable=self.wake_on).grid(
             row=1, column=0, columnspan=3, sticky="w", pady=(12, 0))
         _row(f, 2, "Wake phrase")
@@ -323,6 +324,8 @@ class SettingsDialog:
             "The mic opens by itself after the question's beep and closes when you stop talking; number keys still "
             "work. If you gave the command from your phone, the phone listens instead, as long as its page is open "
             "and you've used its mic since opening it.")).grid(row=9, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(f, text="Play a chime when the mic opens and closes", variable=self.mic_sounds).grid(
+            row=10, column=0, columnspan=3, sticky="w", pady=(12, 0))
         self._wake_test_started = 0.0
         self._wake_test_heard = self._wake_test_hits = 0
         self.wake_phrase.trace_add("write", lambda *_: self._wake_phrase_changed())
@@ -856,6 +859,7 @@ class SettingsDialog:
         s.wake_phrase = self.wake_phrase.get().strip() or s.wake_phrase
         s.wake_sensitivity = round(min(1.0, max(0.0, float(self.wake_sens.get()))), 2)
         s.auto_listen_answers = self.auto_listen.get()
+        s.mic_sounds = self.mic_sounds.get()
         s.yolo = self.yolo.get()
         s.yolo_allow_irreversible = not self.yolo_irreversible.get()
         s.min_action_prob = min(1.0, max(0.0, min_action))

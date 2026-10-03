@@ -41,6 +41,7 @@ class Settings:
     wake_sensitivity: float = 0.5  # 0 = strict (fewer false triggers) … 1 = loose (catches more)
     # Continuous conversation: open the mic by itself when Jev asks a question (on the phone too, if it asked there).
     auto_listen_answers: bool = False
+    mic_sounds: bool = True  # chime when the mic opens and closes
     # Phone remote: a hold-to-talk page served on the local network (see remote.py).
     remote_enabled: bool = False
     remote_port: int = 8765

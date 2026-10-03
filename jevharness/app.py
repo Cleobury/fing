@@ -30,7 +30,7 @@ import keyboard
 import numpy as np
 from typesafe_sdk import TypeSafeAPIError, TypeSafeAuthenticationError, TypeSafeError
 
-from . import autostart, executor, wakephrase
+from . import autostart, executor, sounds, wakephrase
 from .apps import App as InstalledApp
 from .apps import load_start_apps
 from .decide import (
@@ -81,7 +81,6 @@ RECENT_S = 120  # how long earlier actions count as context for a new command
 MAX_NAV_HOPS = 3  # clicks to find where a step can be done (e.g. Library → Store) before giving up
 ANSWER_TIMEOUT_S = 30  # how long a clarifying question waits for a spoken answer
 AUTO_LISTEN_S = 8  # "Listen for my answer automatically": how long the mic waits for you to start talking
-BEEP_S = 0.3  # …after the question's beep, so the mic doesn't hear it
 STUCK_ROUNDS = 3  # rounds in a row without progress before asking the user what to do next
 CHECK_IN_EVERY = 20  # actions beyond what was said between "keep going?" check-ins
 YOLO_MAX_EXTRA = 30  # YOLO mode has no check-ins: stop after this many actions beyond what was said
@@ -514,12 +513,22 @@ class App:
             self.status(self.overlay.idle_state, self.overlay.idle_text)
 
     def _mic_opened(self) -> None:
-        """Every way the mic opens comes through here, so each one plays the indicator's opening ring."""
+        """Every way the mic opens comes through here, so each one plays the indicator's opening animation
+        (and chime)."""
         self.ui(self.overlay.mic_opened)
+        if self.settings.mic_sounds:
+            self._chime("open")
 
     def _mic_closed(self) -> None:
-        """…and every way it closes comes through here, for the closing ring."""
+        """…and every way it closes comes through here, for the closing ones."""
         self.ui(self.overlay.mic_closed)
+        if self.settings.mic_sounds:
+            self._chime("close")
+
+    def _chime(self, name: str) -> None:
+        sounds.play(name)
+        if self.listener:
+            self.listener.mute(sounds.LENGTH_S)  # so hands-free listening doesn't take it for speech
 
     def _start_recording(self, source: str = "key") -> bool:
         """Start listening: "key" (Right Ctrl, the PC mic), "phone" (the phone records and uploads the clip),
@@ -593,7 +602,6 @@ class App:
         if not self._wake_allowed() or not self._start_recording("wake"):
             return False
         self._handsfree_token = token
-        winsound.MessageBeep(winsound.MB_OK)
         return True
 
     def _on_heard(self, token: int, audio: np.ndarray | None) -> None:
@@ -619,7 +627,7 @@ class App:
         """Continuous conversation: open the mic for the answer to the question just asked."""
         if self.listener is None or self.recording:
             return
-        token = self.listener.capture(AUTO_LISTEN_S, delay_s=BEEP_S)
+        token = self.listener.capture(AUTO_LISTEN_S, delay_s=sounds.LENGTH_S)  # after its chime
         if self._start_recording("auto"):
             self._handsfree_token = token
         else:
@@ -1488,15 +1496,16 @@ class App:
         self._answer_keys = {str(i) for i in range(1, min(len(options), 9) + 1)}
         record = {"question": q.prompt, "options": [o for o, _ in options]}
         entry.setdefault("questions", []).append(record)
-        winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        auto_pc = self.settings.auto_listen_answers and self._command_source != "phone"
+        if not (auto_pc and self.settings.mic_sounds):
+            self._chime("question")  # (when the mic opens for the answer, its own chime says so)
         self.ui(self.highlight.mark, q.rects, None)
         self.status("question", self._question_prompt() if not label else label + self._question_prompt())
         self._question_n += 1
-        if self.settings.auto_listen_answers:
-            if self._command_source == "phone":
-                self._phone_auto_listen = True  # the phone page opens its own mic (web/index.html)
-            else:
-                self._listen_for_answer()
+        if auto_pc:
+            self._listen_for_answer()
+        elif self.settings.auto_listen_answers:
+            self._phone_auto_listen = True  # a command from the phone: the phone page opens its own mic (web/index.html)
         # Number keys answer the question: swallow just those keys (not End/arrows, which share numpad scan
         # codes) so they don't also type into the app underneath.
         key_filter = keyboard.hook(self._answer_key_filter, suppress=True)

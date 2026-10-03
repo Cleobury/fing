@@ -127,6 +127,7 @@ class Listener:
         self._lock = threading.Lock()
         self._token = 0
         self._capture: _Capture | None = None
+        self._mute_until = 0.0  # Jev's own chime is playing: don't take it for speech
         self._pending = np.zeros(0, np.float32)
         self._gate = SpeechGate()
         self._spot = Utterance(end_silence_s=0.5)
@@ -157,6 +158,10 @@ class Listener:
             self._token += 1
             self._capture = None
 
+    def mute(self, seconds: float) -> None:
+        """Ignore the mic for a moment (one of Jev's chimes is playing). Speech already under way carries on."""
+        self._mute_until = time.monotonic() + seconds
+
     @property
     def capturing(self) -> bool:
         return self._capture is not None
@@ -182,6 +187,10 @@ class Listener:
         speech = self._gate(frame)
         with self._lock:
             cap = self._capture
+        if time.monotonic() < self._mute_until:
+            if cap is not None and cap.utt.started:
+                cap.utt.push(frame, False)  # keep the words said over the chime, but it can't end the utterance
+            return
         if cap is not None:
             self._capture_frame(cap, frame, speech)
             return
