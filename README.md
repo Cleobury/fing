@@ -27,21 +27,28 @@ System One model) makes each decision from what OCR read on screen: which action
 app, what text to type. Code lists the candidates and Jev picks one, with a probability, so it never has to invent
 coordinates or text, and only acts when it's confident enough (thresholds in Settings → Jev).
 
+Along with the OCR text, it reads the active window's **named controls** from Windows accessibility (UI
+Automation): icon-only buttons like Settings, Close or Search, tabs, and unlabelled text boxes. Jev picks those
+like any other text (turn it off in Settings → Jev).
+
 If what it needs isn't apparent, Jev and OCR look harder before giving up:
 
 - **waits** for a slow app or page to load (up to 5 s)
 - **tries the most likely tab or menu** (e.g. a Store tab), up to 3 clicks
-- **reads the screen again at 2× zoom** to catch small text
+- **reads the screen again more closely**: at 2× zoom, each quarter at 3×, and as a high-contrast negative for
+  light text on dark themes
 - **scrolls** through the window, and back if that didn't help
 
 After the last step, Jev checks the screen to judge whether the whole request is **done**. If it isn't (e.g.
-"open YouTube in Brave" after only opening Brave), Jev chooses the next action itself and keeps going.
+"open YouTube in Brave" after only opening Brave), Jev chooses the next action itself and keeps going. When a
+step fails or the request isn't done, Jev also gets up to **2 actions of its own** before the AI planner is
+called (a failed one goes straight to the AI).
 
 ### Stage 2: can the AI assist?
 
 Only if an **AI planner** is set up (any model on OpenRouter, or a local model through Ollama), and only when
-stage 1 is stuck: a step failed, Jev didn't understand what you said, or the request isn't done and Jev can't see
-what to do next.
+stage 1 is stuck: a step failed and Jev's own next action didn't fix it, Jev didn't understand what you said, or
+the request still isn't done after Jev's own tries.
 
 - **Rewriting the steps:** the AI gets your request, what went wrong, what's on screen (the text with positions,
   plus a screenshot if **Send a screenshot** is on), and the **run journal**: every action so far with what it
@@ -50,7 +57,8 @@ what to do next.
   (`click "LIBRARY"` → `type "Witcher 3" into "Search"`), and each one goes back through Jev, which checks it
   against the real screen.
 - **Looking at the screenshot:** a **vision model** points out icons, images and colours OCR can't read ("open
-  the settings gear", "click the red button"). What it finds becomes something Jev can pick.
+  the settings gear", "click the red button"). What it finds becomes something Jev can pick. It's only called
+  after the closer OCR reads and scrolling have come up empty.
 - **Guided exploring:** the AI suggests places to try (a sidebar, a "More" menu, going back, or a closer look at
   one corner) and the screen is re-read after each.
 

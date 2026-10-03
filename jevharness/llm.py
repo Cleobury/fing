@@ -142,14 +142,16 @@ EXPLORE_SCHEMA = {
 
 
 def describe_elements(screen: Screen, limit: int = 250) -> list[dict]:
-    """OCR elements for the AI: id, text and position (a region name plus the centre in screen pixels)."""
+    """Screen elements for the AI: id, text, the control kind if UI Automation named it, and position (a region
+    name plus the centre in screen pixels)."""
     mon = screen.monitor
     out = []
     for e in screen.elements[:limit]:
         cx, cy = e.center
         h = ("left", "centre", "right")[min(2, max(0, 3 * (cx - mon["left"]) // mon["width"]))]
         v = ("top", "middle", "bottom")[min(2, max(0, 3 * (cy - mon["top"]) // mon["height"]))]
-        out.append({"id": e.id, "text": e.text[:80], "where": f"{v} {h}", "x": cx - mon["left"], "y": cy - mon["top"]})
+        out.append({"id": e.id, "text": e.text[:80], **({"kind": e.kind} if e.kind else {}), "where": f"{v} {h}",
+                    "x": cx - mon["left"], "y": cy - mon["top"]})
     return out
 
 

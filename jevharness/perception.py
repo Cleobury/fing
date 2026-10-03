@@ -10,7 +10,8 @@ from winrt.windows.graphics.imaging import BitmapPixelFormat, SoftwareBitmap
 from winrt.windows.media.ocr import OcrEngine
 from winrt.windows.storage.streams import DataWriter
 
-from .desktop import cursor_pos, foreground_center, foreground_window_title, monitor_at
+from .accessibility import Controls
+from .desktop import cursor_pos, foreground_center, foreground_window, foreground_window_title, monitor_at
 
 # Words on one OCR line further apart than this many line-heights are separate elements
 # (e.g. a toolbar that OCR reads as one line: "File   Edit   View").
@@ -25,6 +26,7 @@ class Element:
     top: int
     width: int
     height: int
+    kind: str = ""  # what UI Automation says it is ("button", "tab", "text box"…); blank for plain OCR text
 
     @property
     def center(self) -> tuple[int, int]:
@@ -67,7 +69,7 @@ def merge_elements(screen: Screen, extra: list[Element]) -> Screen:
     merged = list(screen.elements)
     for el in extra:
         if not any(same(el, m) for m in merged):
-            merged.append(Element(f"e{len(merged) + 1}", el.text, el.left, el.top, el.width, el.height))
+            merged.append(Element(f"e{len(merged) + 1}", el.text, el.left, el.top, el.width, el.height, el.kind))
     return Screen(screen.monitor, screen.window_title, merged, screen.ocr_ms, screen.shot)
 
 
@@ -75,29 +77,70 @@ def _intersects(a, b) -> bool:
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
 
+def _same_label(a: str, b: str) -> bool:
+    a, b = a.lower().strip(), b.lower().strip()
+    return bool(a and b) and (a in b or b in a)
+
+
+def add_controls(elements: list[Element], controls: list, mon: dict, exclude=()) -> list[Element]:
+    """OCR elements plus UI Automation controls ((name, kind, rect) from accessibility.Controls).
+
+    A control whose name OCR already read inside its box just tags that OCR element with its kind; the rest
+    (icon buttons, unlabelled fields, text OCR missed) become new elements. Controls off this monitor, tiny,
+    or as big as a whole panel are skipped.
+    """
+    out = list(elements)
+    area = mon["width"] * mon["height"]
+    for name, kind, (l, t, r, b) in controls:
+        w, h = r - l, b - t
+        cx, cy = l + w // 2, t + h // 2
+        if w < 4 or h < 4 or w * h > area * 0.25:
+            continue
+        if not (mon["left"] <= cx < mon["left"] + mon["width"] and mon["top"] <= cy < mon["top"] + mon["height"]):
+            continue
+        if any(_intersects((l, t, r, b), x) for x in exclude):
+            continue
+        box = (l - 4, t - 4, r + 4, b + 4)
+        inside = [e for e in out if box[0] <= e.center[0] < box[2] and box[1] <= e.center[1] < box[3]]
+        if match := next((e for e in inside if _same_label(e.text, name)), None):
+            match.kind = match.kind or kind
+            continue
+        if any(e.kind and e.text.lower() == name.lower() and e.rect == (l, t, r, b) for e in out):
+            continue  # the same control listed twice
+        out.append(Element(f"e{len(out) + 1}", name, l, t, w, h, kind))
+    return out
+
+
 class Perception:
     def __init__(self):
         self._engine = OcrEngine.try_create_from_user_profile_languages()
         if self._engine is None:
             raise RuntimeError("Windows OCR is unavailable: add an OCR-capable language in Settings > Time & language")
+        self.controls = Controls()
+        self.use_controls = True  # read named controls with UI Automation along with OCR (Settings → Jev)
 
     def capture(self, exclude: list[tuple[int, int, int, int]] = (), follow: str = "cursor",
-                scale: float = 1.0, region: str | None = None) -> Screen:
+                scale: float = 1.0, region: str | None = None, invert: bool = False) -> Screen:
         """OCR the monitor under the mouse (follow="cursor") or holding the active window (follow="foreground").
 
         Elements overlapping `exclude` rects (our own overlay) are dropped. For a closer look, `scale` enlarges
         the image before OCR (small text it would otherwise miss) and `region` (see REGIONS) limits it to part
-        of the monitor. Element positions are always real screen pixels.
+        of the monitor, and `invert` reads a high-contrast negative (light text on dark backgrounds). Element
+        positions are always real screen pixels.
+
+        A normal full read also adds the active window's named controls from UI Automation (see add_controls).
         """
         t0 = time.perf_counter()
         title = foreground_window_title()
+        plain = scale == 1.0 and region is None and not invert
+        controls = self.controls.start(foreground_window()) if plain and self.use_controls else None
         point = (foreground_center() if follow == "foreground" else None) or cursor_pos()
         with mss.MSS() as sct:
             mon = monitor_at(sct.monitors[1:], *point)
             shot = sct.grab(mon)
 
         ox, oy = mon["left"], mon["top"]
-        if scale == 1.0 and region is None:
+        if plain:
             data, width, height = bytes(shot.bgra), shot.width, shot.height
         else:
             from PIL import Image
@@ -107,6 +150,10 @@ class Perception:
                 x0, y0, x1, y1 = region_box(region, shot.width, shot.height)
                 img = img.crop((x0, y0, x1, y1))
                 ox, oy = ox + x0, oy + y0
+            if invert:
+                from PIL import ImageOps
+
+                img = ImageOps.autocontrast(ImageOps.invert(img.convert("L"))).convert("RGB")
             scale = min(scale, (OcrEngine.max_image_dimension - 1) / max(img.size))  # the OCR engine's size limit
             img = img.resize((round(img.width * scale), round(img.height * scale)), Image.LANCZOS)
             data, (width, height) = img.convert("RGBA").tobytes("raw", "BGRA"), img.size
@@ -133,6 +180,8 @@ class Perception:
                 )
                 if not any(_intersects(el.rect, r) for r in exclude):
                     elements.append(el)
+        if controls is not None:
+            elements = add_controls(elements, self.controls.collect(controls), mon, exclude)
         return Screen(mon, title, elements, (time.perf_counter() - t0) * 1000, shot)
 
     async def _recognize(self, bitmap):
