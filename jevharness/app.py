@@ -87,6 +87,7 @@ CHECK_PASS = 0.7  # a script's "check: …" passes when Jev rates the condition 
 CHECK_WAIT_S = 3  # how long a failing check waits for the screen to change before it's recorded as failed
 IRREVERSIBLE = 0.5  # YOLO safe mode stops before an action Jev rates at least this likely to be hard to undo
 DONE_THRESHOLD = 0.5  # after the last step, keep going (Jev, else the AI planner) while Jev's "request is done" is below this
+JEV_TURNS = 2  # with an AI planner: next actions Jev chooses itself before each hand-over to the AI (a failed one hands over)
 LOADING = 0.5  # Jev's "screen is still loading" probability that makes a failing step wait
 JUST_ACTED_S = 3  # a step failing this soon after an action also waits, in case the screen hasn't caught up
 LOAD_WAIT_S = 5  # the longest a step waits for the screen to change before looking elsewhere
@@ -302,6 +303,7 @@ class App:
             from .perception import Perception
 
             self.perception = Perception()
+            self.perception.use_controls = self.settings.read_controls
             self.recorder = Recorder(self.settings.mic_device)
             self.model_ready = True
             log.info("Ready (whisper on %s)", self.transcriber.device)
@@ -387,6 +389,8 @@ class App:
         self._apply_remote()
         if self.recorder:
             self.recorder.set_device(self.settings.mic_device)
+        if self.perception:
+            self.perception.use_controls = self.settings.read_controls
         self._rebuild_decider()
         # Serve the chosen local model now (unloading the previous one), or unload it if Ollama's no longer used.
         self.serve_model_in_background(self.planner, announce=True)
@@ -640,6 +644,8 @@ class App:
         guidance: list[tuple[str, str]] = []  # the user's answers when asked how to get unstuck
         stuck = 0  # rounds in a row without progress: failed steps, repeated actions, or an unchanged screen
         yolo_escalations = 0  # YOLO mode: times it was stuck and tried a new approach instead of asking
+        jev_turns = 0  # next actions Jev has chosen itself since the AI planner last worked out steps
+        jev_failed = False  # the last round was Jev's own choice, and it failed
         entry["yolo"] = self._autonomous
         self._command = command
         self._journal = journal = Journal()
@@ -683,6 +689,7 @@ class App:
                 if extra > 0 and extra % CHECK_IN_EVERY == 0 and not self._keep_going(command, entry):
                     break
                 problem = "The steps so far haven't finished the request. Give only what is still needed."
+                jev_failed = False
             else:
                 step = pending.pop(0)
                 continuing = step is CONTINUE
@@ -768,10 +775,13 @@ class App:
                     self._fail(f"{label}“{step}”: {out.problem}")
                     break
                 # Retrying won't help if nothing has happened yet and Jev didn't understand what was said: ask now.
-                stuck = STUCK_ROUNDS if not done and out.problem.startswith(NOT_UNDERSTOOD) else stuck + 1
+                # Jev's own try failing doesn't count when the AI is next anyway: the AI keeps its turns before asking.
+                stuck = STUCK_ROUNDS if not done and out.problem.startswith(NOT_UNDERSTOOD) else \
+                    stuck + (0 if continuing and jev_turns > 0 else 1)
                 screen, fresh = out.screen, True
                 problem = f'The step "{"finish the request" if continuing else step}" failed: {out.problem}'
                 journal.add("failed", step="finish the request" if continuing else step, reason=out.problem)
+                jev_failed = continuing
 
             if script is not None:
                 # A script step failed: give up on it after a few tries (stop, or move on), else let the AI fix just it.
@@ -814,7 +824,14 @@ class App:
                 if answer is not None and self.planner is None:
                     pending = [answer]  # Jev takes the user's instruction as the next step
                     continue
+            elif (self.planner is not None and self.settings.llm_mode != "always" and not jev_failed
+                  and jev_turns < JEV_TURNS):
+                # Local first: let Jev choose the next action toward the request itself before calling the AI.
+                jev_turns += 1
+                pending = [CONTINUE]
+                continue
             pending = self._further_steps(command, done, screen, problem, guidance, entry)
+            jev_turns = 0
             if pending is None:
                 break
 
@@ -970,12 +987,13 @@ class App:
 
     def _explore(self, step: str, label: str, screen: Screen, context: dict, entry: dict,
                  nav_tried: list[str]) -> StepOutcome | None:
-        """The step's target isn't apparent: look harder, cheapest first.
+        """The step's target isn't apparent: look harder, cheapest and local first.
 
-        1. A closer look: OCR the screen at 2x, which finds small text the normal pass misses.
-           Then, with a vision model, look at the screenshot for icons, images and colours OCR can't read.
+        1. Closer looks, all local OCR with nothing clicked: the screen at 2x (small text), each quarter at 3x
+           (tiny text in toolbars and corners), and a high-contrast negative (light text on dark themes).
         2. Scroll the window down (up to 2 pages), re-reading each time; scroll back if that didn't help.
-        3. With an AI planner: it sees the OCR elements with their positions (and the screenshot), and suggests
+        3. With a vision model: look at the screenshot for icons, images and colours OCR can't read.
+        4. With an AI planner: it sees the OCR elements with their positions (and the screenshot), and suggests
            probes (click a tab or menu, press a key, scroll, or zoom into a region for a closer look). After
            each probe the screen is re-read and Jev checks whether the step can be done now; the AI sees what
            each probe did before suggesting more.
@@ -1006,28 +1024,28 @@ class App:
         def out_of_budget() -> bool:
             return self._cancel.is_set() or time.monotonic() > deadline or actions >= EXPLORE_ACTIONS
 
-        # 1. A closer look.
+        # 1. Closer looks: more OCR passes over the same screen, merged, checked once.
+        def look(**kw) -> list[Element]:
+            return self.perception.capture([self.overlay.rect], follow="foreground", **kw).elements
+
         self.status("thinking", f"{label}Exploring: looking closer…")
-        closer = merge_elements(screen, self.perception.capture([self.overlay.rect], follow="foreground", scale=2.0).elements)
+        closer = merge_elements(screen, look(scale=2.0))
         if len(closer.elements) > len(screen.elements):
             if found := check(closer, f"closer look (+{len(closer.elements) - len(screen.elements)} items)"):
                 return found
-            screen = closer
-        tried.append({"probe": "read the whole screen more closely", "result": "still not found"})
-
-        # 1b. Look at the screenshot: the vision model points out icons, images and colours OCR can't read, and
-        # they become candidates Jev can pick (and the AI's probes can click).
-        if self.vision is not None and not out_of_budget():
-            self.status("thinking", f"{label}Exploring: looking at the screen ({self.vision.name})…")
-            seen_items = self._run_llm(self.vision.locate, step, screen)
-            if seen_items:
-                visual = [Element("v", text, l, t, r - l, b - t) for text, (l, t, r, b) in seen_items]
-                screen = merge_elements(screen, visual)
-                record.append({"vision": [(text, box) for text, box in seen_items]})
-                if found := check(screen, f"looked at the screenshot: {', '.join(text for text, _ in seen_items)}"):
-                    return found
-            tried.append({"probe": "looked at the screenshot for icons and images",
-                          "result": f"found {', '.join(t for t, _ in seen_items)}, but not the target" if seen_items else "nothing relevant"})
+        before = len(closer.elements)
+        self.status("thinking", f"{label}Exploring: zooming into each corner…")
+        for region in ("top-left", "top-right", "bottom-left", "bottom-right"):
+            if self._cancel.is_set():
+                return None
+            closer = merge_elements(closer, look(scale=3.0, region=region))
+        closer = merge_elements(closer, look(scale=2.0, invert=True))
+        if len(closer.elements) > before:
+            if found := check(closer, f"zoomed into each quarter and read it in high contrast (+{len(closer.elements) - before} items)"):
+                return found
+        screen = closer
+        tried.append({"probe": "read the whole screen more closely: 2x, each quarter at 3x, and in high contrast",
+                      "result": "still not found"})
 
         # 2. Scroll down through the window.
         centre = foreground_center()
@@ -1063,7 +1081,21 @@ class App:
                 screen = merge_elements(self.perception.capture([self.overlay.rect], follow="foreground"), closer.elements) \
                     if seen(current) != seen(screen) else screen
 
-        # 3. Let the AI suggest where to look.
+        # 3. Look at the screenshot: the vision model points out icons, images and colours OCR can't read, and
+        # they become candidates Jev can pick (and the AI's probes can click).
+        if self.vision is not None and not out_of_budget():
+            self.status("thinking", f"{label}Exploring: looking at the screen ({self.vision.name})…")
+            seen_items = self._run_llm(self.vision.locate, step, screen)
+            if seen_items:
+                visual = [Element("v", text, l, t, r - l, b - t) for text, (l, t, r, b) in seen_items]
+                screen = merge_elements(screen, visual)
+                record.append({"vision": [(text, box) for text, box in seen_items]})
+                if found := check(screen, f"looked at the screenshot: {', '.join(text for text, _ in seen_items)}"):
+                    return found
+            tried.append({"probe": "looked at the screenshot for icons and images",
+                          "result": f"found {', '.join(t for t, _ in seen_items)}, but not the target" if seen_items else "nothing relevant"})
+
+        # 4. Let the AI suggest where to look.
         if self.planner is None:
             return None
         current = screen

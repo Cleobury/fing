@@ -20,6 +20,7 @@ winrt-Windows.Globalization==3.2.1
 winrt-Windows.Graphics.Imaging==3.2.1
 winrt-Windows.Media.Ocr==3.2.1
 winrt-Windows.Storage.Streams==3.2.1
+comtypes==1.4.17  # UI Automation: names of buttons, icons and fields, read along with OCR
 
 # Input, tray icon, settings
 keyboard==0.13.5

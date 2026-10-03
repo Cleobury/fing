@@ -196,6 +196,11 @@ def _region(el: Element, mon: dict) -> str:
     return "centre" if (h, v) == ("centre", "middle") else f"{v} {h}"
 
 
+def _named(e: Element) -> str:
+    """An element as Jev sees it: its quoted text, plus what kind of control it is when UI Automation said."""
+    return f'"{e.text[:120]}"' + (f" {e.kind}" if e.kind and e.kind != e.text else "")
+
+
 def _shortlist(command: str, elements: list[Element]) -> list[Element]:
     """If the screen has more text than a Choice can hold, keep the elements most like the command."""
     if len(elements) <= MAX_TARGETS:
@@ -346,9 +351,10 @@ class Decider:
             "command": command,
             **(context or {}),
             "active_window": screen.window_title,
-            "screen_elements": [{"id": e.id, "text": e.text[:120], "where": _region(e, screen.monitor)} for e in targets],
+            "screen_elements": [{"id": e.id, "text": e.text[:120], "where": _region(e, screen.monitor),
+                                 **({"kind": e.kind} if e.kind else {})} for e in targets],
         }
-        target_options = {e.id: f'"{e.text[:120]}" ({_region(e, screen.monitor)} of the screen)' for e in targets}
+        target_options = {e.id: f"{_named(e)} ({_region(e, screen.monitor)} of the screen)" for e in targets}
         target_options["none"] = "No listed element: the command needs no on-screen target, or what it refers to is not visible"
 
         questions = {

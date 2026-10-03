@@ -30,6 +30,8 @@ class Settings:
     # Minimum probability of Jev's chosen action / on-screen target before we act.
     min_action_prob: float = 0.5
     min_target_prob: float = 0.4
+    # Also read the active window's named controls (icon buttons, tabs, fields) from Windows UI Automation.
+    read_controls: bool = True
     whisper_model: str = "large-v3-turbo"
     language: str = "en"
     mic_device: str = ""  # input device name; blank = the Windows default microphone

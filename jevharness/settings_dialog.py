@@ -129,13 +129,16 @@ class SettingsDialog:
             f, text="…but still refuse irreversible actions (delete, buy, send, sign out…)", variable=self.yolo_irreversible)
         self.yolo_safety_check.grid(row=7, column=0, columnspan=3, sticky="w", padx=(22, 0), pady=(4, 0))
         self._yolo_changed()
+        self.read_controls = tk.BooleanVar(value=s.read_controls)
+        ttk.Checkbutton(f, text="Also read button and icon names from the app (Windows accessibility)",
+                        variable=self.read_controls).grid(row=8, column=0, columnspan=3, sticky="w", pady=(8, 0))
         self.autostart = tk.BooleanVar(value=autostart.is_enabled())
         ttk.Checkbutton(f, text="Start with Windows (when I sign in)", variable=self.autostart).grid(
-            row=8, column=0, columnspan=3, sticky="w", pady=(12, 0))
+            row=9, column=0, columnspan=3, sticky="w", pady=(12, 0))
         self.mic = tk.StringVar(value=s.mic_device or _SYSTEM_DEFAULT_MIC)
-        _row(f, 9, "Microphone")
+        _row(f, 10, "Microphone")
         ttk.Combobox(f, textvariable=self.mic, values=self._mic_choices(s.mic_device), state="readonly", width=44).grid(
-            row=9, column=1, columnspan=2, sticky="we", pady=(12, 0))
+            row=10, column=1, columnspan=2, sticky="we", pady=(12, 0))
 
     def _mic_choices(self, saved: str) -> list[str]:
         names = []
@@ -745,6 +748,7 @@ class SettingsDialog:
         s = self.app.settings
         s.model = self.model.get().strip() or "jev-latest"
         s.dry_run = self.dry_run.get()
+        s.read_controls = self.read_controls.get()
         s.remote_enabled = self.remote_on.get()
         s.remote_pin = self.remote_pin.get()
         s.remote_port = remote_port
