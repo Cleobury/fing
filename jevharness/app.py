@@ -1480,6 +1480,8 @@ class App:
             if p.kind == "open_app":
                 self.status("thinking", f"{label}Waiting for {p.app.name} to open…")
             self._wait_for_app_window(p.app.name, before, 10 if p.kind == "open_app" else 2, existing)
+            if p.kind == "open_app":
+                self.status("done", f"{label}{p.description}", 3000)  # else "Waiting…" would outlast the command
             self._settle(2, SLOW_QUIET_S, moving)
             return
         slow = (p.kind in ("click", "double_click", "search_pc")
