@@ -125,6 +125,11 @@ def find_app_window(app_name: str) -> int | None:
     return next((h for h, title, exe in app_windows() if window_belongs_to(app_name, title, exe)), None)
 
 
+def app_window_handles(app_name: str) -> set[int]:
+    """All of the app's visible windows."""
+    return {h for h, title, exe in app_windows() if window_belongs_to(app_name, title, exe)}
+
+
 def foreground_is(app_name: str) -> bool:
     hwnd = _user32.GetForegroundWindow()
     return bool(hwnd) and window_belongs_to(app_name, foreground_window_title(), _window_exe(hwnd))

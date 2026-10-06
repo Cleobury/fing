@@ -44,7 +44,9 @@ from .decide import (
 )
 from .desktop import (
     animating_cells,
+    app_window_handles,
     find_app_window,
+    focus_window,
     foreground_center,
     foreground_is,
     foreground_window,
@@ -895,11 +897,12 @@ class App:
                         results[-1]["actions"].append(p.description)
                     event = journal.action("(the next step toward the request)" if continuing else step, p.description, source)
                     before, moving = foreground_window(), animating_cells()
+                    existing = app_window_handles(p.app.name) if p.kind == "open_app" else set()
                     self._execute(p)
                     done.append(p.description)
                     self._recent.append((time.monotonic(), p.description))
                     self.status("done", f"{label}{p.description}", 3000)
-                    self._let_screen_catch_up(p, before, moving)
+                    self._let_screen_catch_up(p, before, moving, existing, label)
                     after = self.perception.capture([self.overlay.rect], follow="foreground")
                     event["change"] = describe_change(out.screen, after)
                     screen, fresh = after, True
@@ -1465,14 +1468,21 @@ class App:
                 return self.perception.capture([self.overlay.rect], follow="foreground")
         return None
 
-    def _let_screen_catch_up(self, p: Plan, before: int, moving=None) -> None:
+    def _let_screen_catch_up(self, p: Plan, before: int, moving=None, existing: set[int] = frozenset(),
+                             label: str = "") -> None:
         """After an action, wait for its effect: the app's window for "open app", then the screen to be ready.
         That's as soon as it stops changing, so a key press or scroll that's already drawn moves straight on;
-        only an action that may set off a load (opening an app, a click, Enter) watches a little longer for one
-        to start. `moving` is what was already animating before the action (see `animating_cells`)."""
+        only an action that may set off a load (a click, Enter) watches a little longer for one to start.
+        Once an app's window is up, the next step doesn't wait for everything in it to load: if what it needs
+        isn't there yet, it waits for it then (see LOAD_WAIT_S). `moving` is what was already animating before
+        the action (see `animating_cells`); `existing` the app's windows from before it was opened."""
         if p.kind in ("open_app", "switch_app"):
-            self._wait_for_app_window(p.app.name, before, 10 if p.kind == "open_app" else 2)
-        slow = (p.kind in ("open_app", "click", "double_click", "search_pc")
+            if p.kind == "open_app":
+                self.status("thinking", f"{label}Waiting for {p.app.name} to open…")
+            self._wait_for_app_window(p.app.name, before, 10 if p.kind == "open_app" else 2, existing)
+            self._settle(2, SLOW_QUIET_S, moving)
+            return
+        slow = (p.kind in ("click", "double_click", "search_pc")
                 or (p.kind == "press_key" and p.key == "enter") or (p.kind == "type_text" and p.submit))
         self._settle(6 if slow else 2, SLOW_QUIET_S if slow else QUICK_QUIET_S, moving)
 
@@ -1639,13 +1649,17 @@ class App:
         now = time.monotonic()
         return [d for t, d in self._recent if now - t < RECENT_S]
 
-    def _wait_for_app_window(self, name: str, before: int, timeout_s: float) -> None:
-        """Wait until the app's window is in front (e.g. "TickTick - Inbox"). If some other window takes
-        focus instead, give the app's own window a few more seconds, then carry on."""
+    def _wait_for_app_window(self, name: str, before: int, timeout_s: float, existing: set[int] = frozenset()) -> None:
+        """Wait until the app's window is up (e.g. "TickTick - Inbox"), bringing it to the front if it opened
+        behind another window. If some other window takes focus instead, give the app's own window a few more
+        seconds, then carry on. `existing`: the app's windows from before, which don't count."""
         deadline = time.monotonic() + timeout_s
         changed_at = None
         while time.monotonic() < deadline and not self._cancel.is_set():
-            if foreground_is(name):
+            if foreground_is(name) and foreground_window() not in existing:
+                return
+            if new := app_window_handles(name) - existing:
+                focus_window(next(iter(new)))
                 return
             if foreground_window() != before:
                 changed_at = changed_at or time.monotonic()
