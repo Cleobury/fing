@@ -318,7 +318,9 @@ class Decider:
         questions = {"done": Noul(instructions=(
             "The user asked for `request` and these actions were carried out: `steps_done`. Judging by those and by what "
             "is on screen now, has `request` been fully done, with nothing left to do? No if part of it (e.g. finding, "
-            "typing or opening something it mentions) hasn't happened yet."
+            "typing or opening something it mentions) hasn't happened yet. Yes if the last part has been set going and "
+            "the screen shows it under way (e.g. 'Connecting…', 'Waiting to connect to …', 'Downloading', 'Calling'): "
+            "nothing more is needed from us."
         ))}
         if last_action:
             state.update(last_action=last_action["action"], last_step=last_action["step"])
@@ -490,6 +492,34 @@ def _tied(answer, items, min_target: float, ambiguous: bool = False, max_options
     return [lookup[k] for k, v in ranked[:max_options] if v >= 0.1]
 
 
+def _ranked(answer, elements: list[Element]) -> list[Element]:
+    """`elements` that `answer` chose between, most likely first."""
+    by_id = {e.id: e for e in elements}
+    return [by_id[k] for k, _ in sorted(answer.probabilities.items(), key=lambda kv: -kv[1]) if k in by_id]
+
+
+NEAR_PX = 200  # a button this close to a label (centre to centre) goes with it, like a card's title and its "Connect"
+
+
+def _control_for(step: str, tied: list[Element]) -> Element | None:
+    """When Jev is torn between a label and the button next to it that does what the step says ("connect to my
+    work laptop": the "WorkLaptop" title or its "Connect" button), the button. Clicking a label usually does nothing."""
+    words = _tokens(step)
+    if not words or len(tied) < 2:
+        return None
+    a, b = tied[:2]
+
+    def does_step(e: Element) -> bool:
+        t = _tokens(e.text)
+        return 0 < len(t) <= 3 and t[0] == words[0] and set(t) <= set(words)
+
+    if does_step(a) == does_step(b):
+        return None
+    button, label = (a, b) if does_step(a) else (b, a)
+    (bx, by), (lx, ly) = button.center, label.center
+    return button if (bx - lx) ** 2 + (by - ly) ** 2 <= NEAR_PX ** 2 else None
+
+
 def _label(e: Element) -> str:
     return f'"{e.text[:40]}"'
 
@@ -503,7 +533,8 @@ def navigation(answers: dict, targets: list[Element], min_target: float, tried: 
     return el if el is not None and el.text not in tried else None
 
 
-def plan(answers: dict, targets: list[Element], texts: list[str], apps: list[App], min_action: float, min_target: float) -> Plan:
+def plan(answers: dict, targets: list[Element], texts: list[str], apps: list[App], min_action: float, min_target: float,
+         step: str = "") -> Plan:
     action = answers["action"]
     kind, p_action = action.choice, action.probabilities[action.choice]
     target_ans = answers["target"]
@@ -564,9 +595,15 @@ def plan(answers: dict, targets: list[Element], texts: list[str], apps: list[App
         verb = {"click": "Click", "double_click": "Double-click", "right_click": "Right-click"}[kind]
         make = lambda el: Plan(True, f'{verb} "{el.text[:50]}"', kind=kind, target=el, log=log)
         if tied := _tied(target_ans, targets, min_target, ambiguous):
+            if (button := _control_for(step, tied)) is not None:
+                return make(button)
             return ask(f"{verb} which one?", [(_label(e), e) for e in tied], make, [e.rect for e in tied])
         if target is None or p_target < min_target:
             return fail(f"Couldn't find what to {verb.lower()} on this screen")
+        # Even a clear pick of a card's title loses to the button on it that does the step, if Jev rated that at all.
+        runner_up = [e for e in _ranked(target_ans, targets)[1:2] if target_ans.probabilities[e.id] >= 0.15]
+        if runner_up and (button := _control_for(step, [target, *runner_up])) is not None:
+            return make(button)
         return make(target)
 
     if kind == "type_text":

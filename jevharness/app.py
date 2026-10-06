@@ -1072,7 +1072,7 @@ class App:
             self.status("thinking", f"{label}“{step}”" + (f" (looking: {' → '.join(tried)})" if tried else ""))
             t = time.perf_counter()
             answers, targets, texts, apps = self.decider.ask(step, screen, self.installed_apps, {**context, "navigation_tried": tried})
-            p = plan(answers, targets, texts, apps, self.settings.min_action_prob, self.settings.min_target_prob)
+            p = plan(answers, targets, texts, apps, self.settings.min_action_prob, self.settings.min_target_prob, step)
             if hop == 0 and "last_worked" in answers:
                 self._step_last_worked = answers["last_worked"].noul
             nav = None if p.ok else navigation(answers, targets, self.settings.min_target_prob, set(tried))
@@ -1150,7 +1150,7 @@ class App:
 
         def check(scr: Screen, how: str) -> StepOutcome | None:
             answers, targets, texts, apps = self.decider.ask(step, scr, self.installed_apps, {**context, "navigation_tried": nav_tried})
-            found = plan(answers, targets, texts, apps, self.settings.min_action_prob, self.settings.min_target_prob)
+            found = plan(answers, targets, texts, apps, self.settings.min_action_prob, self.settings.min_target_prob, step)
             record.append({"how": how, "window": scr.window_title, "elements": len(scr.elements), "plan": found.description, "ok": found.ok})
             if found.ok:
                 return StepOutcome(found, None, scr)
