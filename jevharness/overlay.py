@@ -415,6 +415,7 @@ class Highlight:
         self.hwnd = _make_passive(self.win)
         _user32.ShowWindow(self.hwnd, _SW_HIDE)
         self._job = None
+        self.rect = (0, 0, 0, 0)  # where it's showing (empty while hidden)
 
     BADGE = 30
 
@@ -435,6 +436,7 @@ class Highlight:
         y1 = max(r[3] for r in rects) + p
         w, h = x1 - x0, y1 - y0
         self.win.geometry(f"{w}x{h}{x0:+d}{y0:+d}")
+        self.rect = (x0, y0, x1, y1)
         c = self.canvas
         c.configure(width=w, height=h)
         c.delete("all")
@@ -451,4 +453,5 @@ class Highlight:
 
     def hide(self) -> None:
         self._job = None
+        self.rect = (0, 0, 0, 0)
         _user32.ShowWindow(self.hwnd, _SW_HIDE)

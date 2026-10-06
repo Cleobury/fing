@@ -43,7 +43,10 @@ from .decide import (
     plan,
 )
 from .desktop import (
+    animating_cells,
+    app_window_handles,
     find_app_window,
+    focus_window,
     foreground_center,
     foreground_is,
     foreground_window,
@@ -94,6 +97,8 @@ JEV_TURNS = 2  # with an AI planner: next actions Jev chooses itself before each
 LOADING = 0.5  # Jev's "screen is still loading" probability that makes a failing step wait
 JUST_ACTED_S = 3  # a step failing this soon after an action also waits, in case the screen hasn't caught up
 LOAD_WAIT_S = 5  # the longest a step waits for the screen to change before looking elsewhere
+QUICK_QUIET_S = 0.15  # after a key, scroll or typing: the screen is ready once it's been still this long
+SLOW_QUIET_S = 0.4  # after a click, Enter or opening an app: still this long, in case a load is about to start
 EXPLORE_ACTIONS = 8  # actions (scrolls, clicks, keys, zooms) one step may spend exploring for its target
 EXPLORE_S = 60  # and the time
 EXPLORE_ROUNDS = 3  # rounds of AI suggestions
@@ -891,12 +896,13 @@ class App:
                     if results:
                         results[-1]["actions"].append(p.description)
                     event = journal.action("(the next step toward the request)" if continuing else step, p.description, source)
-                    before = foreground_window()
+                    before, moving = foreground_window(), animating_cells()
+                    existing = app_window_handles(p.app.name) if p.kind == "open_app" else set()
                     self._execute(p)
                     done.append(p.description)
                     self._recent.append((time.monotonic(), p.description))
                     self.status("done", f"{label}{p.description}", 3000)
-                    self._let_screen_catch_up(p, before)
+                    self._let_screen_catch_up(p, before, moving, existing, label)
                     after = self.perception.capture([self.overlay.rect], follow="foreground")
                     event["change"] = describe_change(out.screen, after)
                     screen, fresh = after, True
@@ -1066,7 +1072,7 @@ class App:
             self.status("thinking", f"{label}“{step}”" + (f" (looking: {' → '.join(tried)})" if tried else ""))
             t = time.perf_counter()
             answers, targets, texts, apps = self.decider.ask(step, screen, self.installed_apps, {**context, "navigation_tried": tried})
-            p = plan(answers, targets, texts, apps, self.settings.min_action_prob, self.settings.min_target_prob)
+            p = plan(answers, targets, texts, apps, self.settings.min_action_prob, self.settings.min_target_prob, step)
             if hop == 0 and "last_worked" in answers:
                 self._step_last_worked = answers["last_worked"].noul
             nav = None if p.ok else navigation(answers, targets, self.settings.min_target_prob, set(tried))
@@ -1109,9 +1115,10 @@ class App:
                 return StepOutcome(None, None, screen)
             tried.append(nav.text)
             hop += 1
+            moving = animating_cells()
             self._execute(Plan(True, f'Click "{nav.text[:50]}"', kind="click", target=nav))
             self.status("thinking", f'{label}Not here: trying "{nav.text[:40]}"')
-            wait_until_settled(6, self._cancel.is_set)
+            self._settle(6, SLOW_QUIET_S, moving)
             looked_from, screen = screen, self.perception.capture([self.overlay.rect], follow="foreground")
             self._journal.add("look", what=f'clicked "{nav.text[:40]}" to look for what "{step[:40]}" needs',
                               result=describe_change(looked_from, screen))
@@ -1143,7 +1150,7 @@ class App:
 
         def check(scr: Screen, how: str) -> StepOutcome | None:
             answers, targets, texts, apps = self.decider.ask(step, scr, self.installed_apps, {**context, "navigation_tried": nav_tried})
-            found = plan(answers, targets, texts, apps, self.settings.min_action_prob, self.settings.min_target_prob)
+            found = plan(answers, targets, texts, apps, self.settings.min_action_prob, self.settings.min_target_prob, step)
             record.append({"how": how, "window": scr.window_title, "elements": len(scr.elements), "plan": found.description, "ok": found.ok})
             if found.ok:
                 return StepOutcome(found, None, scr)
@@ -1195,7 +1202,7 @@ class App:
                 finally:
                     self._executing = False
                 actions += 1
-                wait_until_settled(1.5, self._cancel.is_set)
+                self._settle(1.5)
                 after = self.perception.capture([self.overlay.rect], follow="foreground")
                 if seen(after) == seen(current):
                     break  # nothing scrolled
@@ -1210,7 +1217,7 @@ class App:
                     executor.scroll_at(*centre, 5 * scrolled)
                 finally:
                     self._executing = False
-                wait_until_settled(1.5, self._cancel.is_set)
+                self._settle(1.5)
                 screen = merge_elements(self.perception.capture([self.overlay.rect], follow="foreground"), closer.elements) \
                     if seen(current) != seen(screen) else screen
 
@@ -1254,7 +1261,7 @@ class App:
                     zoomed = self.perception.capture([self.overlay.rect], follow="foreground", scale=3.0, region=probe.get("region"))
                     after = merge_elements(current, zoomed.elements)
                 else:
-                    wait_until_settled(3, self._cancel.is_set)
+                    self._settle(3)
                     after = self.perception.capture([self.overlay.rect], follow="foreground")
                 if found := check(after, desc):
                     return found
@@ -1457,15 +1464,33 @@ class App:
             time.sleep(0.5)
             now = self.perception.capture([self.overlay.rect], follow="foreground")
             if (now.window_title, {e.text for e in now.elements}) != before:
-                wait_until_settled(max(0.5, min(2.0, until - time.monotonic())), self._cancel.is_set)
+                self._settle(max(0.5, min(2.0, until - time.monotonic())))
                 return self.perception.capture([self.overlay.rect], follow="foreground")
         return None
 
-    def _let_screen_catch_up(self, p: Plan, before: int) -> None:
-        """After an action, wait for its effect: the app's window for "open app", then the screen to settle."""
+    def _let_screen_catch_up(self, p: Plan, before: int, moving=None, existing: set[int] = frozenset(),
+                             label: str = "") -> None:
+        """After an action, wait for its effect: the app's window for "open app", then the screen to be ready.
+        That's as soon as it stops changing, so a key press or scroll that's already drawn moves straight on;
+        only an action that may set off a load (a click, Enter) watches a little longer for one to start.
+        Once an app's window is up, the next step doesn't wait for everything in it to load: if what it needs
+        isn't there yet, it waits for it then (see LOAD_WAIT_S). `moving` is what was already animating before
+        the action (see `animating_cells`); `existing` the app's windows from before it was opened."""
         if p.kind in ("open_app", "switch_app"):
-            self._wait_for_app_window(p.app.name, before, 10 if p.kind == "open_app" else 2)
-        wait_until_settled(6 if p.kind in ("open_app", "click", "double_click", "search_pc") else 2, self._cancel.is_set)
+            if p.kind == "open_app":
+                self.status("thinking", f"{label}Waiting for {p.app.name} to open…")
+            self._wait_for_app_window(p.app.name, before, 10 if p.kind == "open_app" else 2, existing)
+            if p.kind == "open_app":
+                self.status("done", f"{label}{p.description}", 3000)  # else "Waiting…" would outlast the command
+            self._settle(2, SLOW_QUIET_S, moving)
+            return
+        slow = (p.kind in ("click", "double_click", "search_pc")
+                or (p.kind == "press_key" and p.key == "enter") or (p.kind == "type_text" and p.submit))
+        self._settle(6 if slow else 2, SLOW_QUIET_S if slow else QUICK_QUIET_S, moving)
+
+    def _settle(self, timeout_s: float, quiet_s: float = QUICK_QUIET_S, moving=None) -> None:
+        """Wait until the screen is ready (see `wait_until_settled`), not counting Jev's own pill and highlight."""
+        wait_until_settled(timeout_s, self._cancel.is_set, quiet_s, lambda: (self.overlay.rect, self.highlight.rect), moving)
 
     def _fail(self, text: str) -> None:
         winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
@@ -1626,13 +1651,17 @@ class App:
         now = time.monotonic()
         return [d for t, d in self._recent if now - t < RECENT_S]
 
-    def _wait_for_app_window(self, name: str, before: int, timeout_s: float) -> None:
-        """Wait until the app's window is in front (e.g. "TickTick - Inbox"). If some other window takes
-        focus instead, give the app's own window a few more seconds, then carry on."""
+    def _wait_for_app_window(self, name: str, before: int, timeout_s: float, existing: set[int] = frozenset()) -> None:
+        """Wait until the app's window is up (e.g. "TickTick - Inbox"), bringing it to the front if it opened
+        behind another window. If some other window takes focus instead, give the app's own window a few more
+        seconds, then carry on. `existing`: the app's windows from before, which don't count."""
         deadline = time.monotonic() + timeout_s
         changed_at = None
         while time.monotonic() < deadline and not self._cancel.is_set():
-            if foreground_is(name):
+            if foreground_is(name) and foreground_window() not in existing:
+                return
+            if new := app_window_handles(name) - existing:
+                focus_window(next(iter(new)))
                 return
             if foreground_window() != before:
                 changed_at = changed_at or time.monotonic()

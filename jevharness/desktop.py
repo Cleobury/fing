@@ -12,6 +12,8 @@ from ctypes import wintypes
 import mss
 import numpy as np
 
+from . import settle
+
 _user32 = ctypes.windll.user32
 
 
@@ -123,6 +125,11 @@ def find_app_window(app_name: str) -> int | None:
     return next((h for h, title, exe in app_windows() if window_belongs_to(app_name, title, exe)), None)
 
 
+def app_window_handles(app_name: str) -> set[int]:
+    """All of the app's visible windows."""
+    return {h for h, title, exe in app_windows() if window_belongs_to(app_name, title, exe)}
+
+
 def foreground_is(app_name: str) -> bool:
     hwnd = _user32.GetForegroundWindow()
     return bool(hwnd) and window_belongs_to(app_name, foreground_window_title(), _window_exe(hwnd))
@@ -182,21 +189,57 @@ def fullscreen_at(x: int, y: int) -> bool:
     return r.left <= m.left and r.top <= m.top and r.right >= m.right and r.bottom >= m.bottom
 
 
-def wait_until_settled(timeout_s: float, cancelled=lambda: False, min_s: float = 0.25) -> None:
-    """Block until the active window's monitor stops changing (page loaded, animation done) or timeout."""
-    deadline = time.perf_counter() + timeout_s
-    time.sleep(min_s)
-    prev, stable = None, 0
+class _CURSORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD), ("hCursor", ctypes.c_void_p),
+                ("ptScreenPos", wintypes.POINT)]
+
+
+_user32.LoadCursorW.restype = ctypes.c_void_p
+_user32.LoadCursorW.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+# The hourglass and the arrow-with-hourglass: Windows shows these while an app starts, and apps while they're busy.
+_BUSY_CURSORS = {_user32.LoadCursorW(None, ctypes.c_void_p(32514)), _user32.LoadCursorW(None, ctypes.c_void_p(32650))}
+
+
+def cursor_busy() -> bool:
+    """Whether the pointer is a wait / "working in background" cursor: something is still starting or loading."""
+    ci = _CURSORINFO(cbSize=ctypes.sizeof(_CURSORINFO))
+    return bool(_user32.GetCursorInfo(ctypes.byref(ci))) and ci.hCursor in _BUSY_CURSORS
+
+
+def _active_monitor(sct) -> dict:
+    return monitor_at(sct.monitors[1:], *(foreground_center() or cursor_pos()))
+
+
+def _grid(sct, mon: dict) -> np.ndarray:
+    return settle.sample(np.frombuffer(sct.grab(mon).bgra, np.uint8).reshape(mon["height"], mon["width"], 4))
+
+
+def animating_cells(span_s: float = 0.1) -> tuple[tuple[int, int], np.ndarray] | None:
+    """What on the active monitor is moving by itself right now (a video, a spinner, a clock): taken just
+    before an action, so the wait after it isn't held up by things the action didn't cause."""
     with mss.MSS() as sct:
-        while time.perf_counter() < deadline and not cancelled():
-            mon = monitor_at(sct.monitors[1:], *(foreground_center() or cursor_pos()))
-            # Coarse grid of pixels: cheap, and ignores a blinking caret.
-            img = np.frombuffer(sct.grab(mon).bgra, np.uint8).reshape(mon["height"], mon["width"], 4)[::24, ::24, :3]
-            if prev is not None and prev.shape == img.shape and np.abs(img.astype(np.int16) - prev).mean() < 0.8:
-                stable += 1
-                if stable >= 2:
-                    return
-            else:
-                stable = 0
-            prev = img
-            time.sleep(0.15)
+        mon = _active_monitor(sct)
+        a = _grid(sct, mon)
+        time.sleep(span_s)
+        b = _grid(sct, mon)
+    return (mon["left"], mon["top"]), settle.grow(settle.changed(a, b))
+
+
+def wait_until_settled(timeout_s: float, cancelled=lambda: False, quiet_s: float = 0.3, ignore=lambda: (),
+                       animating: tuple[tuple[int, int], np.ndarray] | None = None) -> None:
+    """Block until the active window's monitor has been still for `quiet_s` (page loaded, app started,
+    animation done), or `timeout_s`. A wait cursor counts as not ready. `ignore` returns screen rects that
+    don't count (Jev's own windows); `animating` is from `animating_cells`, taken before the action."""
+    deadline = time.perf_counter() + timeout_s
+    watch = settle.Settle(quiet_s)
+    with mss.MSS() as sct:
+        while not cancelled():
+            mon = _active_monitor(sct)
+            grid = _grid(sct, mon)
+            now = time.perf_counter()
+            skip = settle.rect_mask(grid.shape, mon["left"], mon["top"], ignore())
+            if animating is not None and animating[0] == (mon["left"], mon["top"]) and animating[1].shape == skip.shape:
+                skip |= animating[1]
+            if watch.update(grid, now, skip, cursor_busy()) or now >= deadline:
+                return
+            time.sleep(0.05)
