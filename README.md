@@ -319,7 +319,8 @@ if you used `-Startup`) and `%APPDATA%\JevHarness`. The API keys are under **Jev
 | `decide.py` | Jev questions: splitting a request into steps, the action for a step (including drags), done / loading / ambiguity / option-fit / irreversible checks |
 | `llm.py` | The AI over an OpenAI-compatible chat API (OpenRouter, Ollama): planning steps, exploring, locating things on the screenshot; Ollama keep-alive |
 | `perception.py` | Screenshot + Windows OCR → text elements with screen positions |
-| `desktop.py` | Win32: foreground and open app windows, switching to a window, fullscreen detection, waiting for the screen to settle |
+| `desktop.py` | Win32: foreground and open app windows, switching to a window, fullscreen detection, a wait cursor, waiting for the screen to settle |
+| `settle.py` | When the screen is ready after an action: still for a moment, not counting Jev's own windows or what was already moving |
 | `executor.py` | Mouse (clicks, drags, scrolling), keyboard, launching and switching apps, PC search |
 | `stt.py`, `audio.py` | Whisper on CUDA; microphone capture with a short pre-roll |
 | `listen.py`, `wakephrase.py` | Hands-free: speech detection on the open mic, spotting the wake phrase, recording an answer without Right Ctrl; rating a phrase |
@@ -336,5 +337,5 @@ if you used `-Startup`) and `%APPDATA%\JevHarness`. The API keys are under **Jev
 Whisper must load before anything in the process initialises COM (Windows OCR, PortAudio, the tray icon), or
 CTranslate2 crashes. That's why `.audio` and `.perception` are imported late in `app.py`.
 
-The hands-free logic (speech detection, phrase matching and rating) has tests that run anywhere:
+The hands-free logic (speech detection, phrase matching and rating) and the screen-ready check have tests that run anywhere:
 `pip install pytest`, then `python -m pytest`.
