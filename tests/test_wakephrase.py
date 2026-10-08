@@ -2,8 +2,28 @@ from jevharness import wakephrase as w
 
 
 def test_whisper_misspellings_of_the_name_still_match():
+    for heard in ("Hey Fing.", "Hey thing.", "Hey, Finn.", "So, hey Fing."):
+        assert w.is_wake("hey fing", heard, 0.5), heard
+
+
+def test_a_phrase_saved_before_the_rename_still_works():
     for heard in ("Hey Jev.", "Hey Jeff.", "Hey, Jeb.", "So, hey Jev."):
         assert w.is_wake("hey jev", heard, 0.5), heard
+
+
+def test_talk_about_things_does_not_match_hey_fing():
+    for heard in ("The thing is", "I found a thing", "Hey you", "Hey everything"):
+        assert not w.is_wake("hey fing", heard, 0.5), heard
+
+
+def test_renaming_the_assistant_renames_its_wake_phrase():
+    assert w.renamed("hey fing", "Fing", "Pointer") == "hey pointer"
+    assert w.renamed("okay fing", "Fing", "Max Power") == "okay max power"
+    assert w.renamed("", "Fing", "Pointer") == "hey pointer"
+
+
+def test_renaming_leaves_a_phrase_without_the_old_name_alone():
+    assert w.renamed("hey jarvis", "Fing", "Pointer") == "hey jarvis"
 
 
 def test_ordinary_talk_does_not_match():
@@ -36,7 +56,8 @@ def test_suggestions_use_the_name_typed():
 
 def test_everyday_words_are_weak():
     st = w.strength("hey you")
-    assert st.rating == "weak" and "Hey Jev" in st.suggestions
+    assert st.rating == "weak" and "Hey Fing" in st.suggestions
+    assert "Hey Pointer" in w.strength("hey you", "Pointer").suggestions
 
 
 def test_ratings_for_good_phrases():

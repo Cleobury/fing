@@ -84,7 +84,7 @@ class Overlay:
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.idle_text = "Jev ready · hold Right Ctrl"
+        self.idle_text = "Fing ready · hold Right Ctrl"
         self.idle_state = "idle"  # "warn" while something needs fixing, e.g. no API key
         self.bg, self.fg, self.dots = DEFAULT_BG, DEFAULT_FG, dict(DEFAULT_DOTS)
         self._last = ("loading", "", False)  # what's showing, to redraw after a style change
@@ -95,6 +95,8 @@ class Overlay:
         self.hwnd = _make_passive(self.win)
         self.state = "loading"
         self._pulse_on = False
+        self._tick = 0  # frames of the animation loop (see _animate)
+        self._shake_job = None
         self._ring_job = None  # the mic open/close ring animation in progress
         self._dot_at = (self.DOT // 2, self.DOT // 2, 9)  # the dot's centre, and the largest ring that fits around it
         self._revert_job = None
@@ -115,7 +117,7 @@ class Overlay:
         c.tag_bind("check", "<Enter>", lambda _: (c.itemconfigure("check_bg", fill=_CHECK_HOVER), c.configure(cursor="hand2")))
         c.tag_bind("check", "<Leave>", lambda _: (c.itemconfigure("check_bg", fill=_CHECK_BG), c.configure(cursor="")))
         self.show("loading", "Loading speech model…")
-        self._pulse()
+        self._animate()
         self._keep_on_top()
 
     DOT = 20  # size of the idle dot
@@ -157,6 +159,9 @@ class Overlay:
             c.create_oval(5, 5, w - 5, h - 5, fill=self.dots[state], outline="", tags="dot")
             self._dot_at = (w // 2, h // 2, w // 2 - 1)
         c.configure(width=w, height=h)
+        if self._shake_job:
+            self.root.after_cancel(self._shake_job)
+            self._shake_job = None
         x, y = self._place(w, dot_y, ax, ay, align)
         self.win.geometry(f"{w}x{h}{x:+d}{y:+d}")
         self.rect = (x, y, x + w, y + h)
@@ -383,11 +388,51 @@ class Overlay:
         c.tag_lower("ring", "dot")
         self._ring_job = self.root.after(self.RING_MS, lambda: self._ring(opening, frame + 1))
 
-    def _pulse(self) -> None:
-        if self.state == "listening":
+    def dot_screen(self) -> tuple[int, int]:
+        """Where the dot is on the screen (for the hand animations that come out of it)."""
+        x, y, _ = self._dot_at
+        return self.rect[0] + int(x), self.rect[1] + int(y)
+
+    def shake(self) -> None:
+        """Shake the pill side to side, like a head saying no (something went wrong)."""
+        if self._moving:
+            return
+        x0, y0, x1, y1 = self.rect
+        offsets = (7, -7, 6, -6, 4, -4, 2, -1, 0)
+
+        def step(i: int) -> None:
+            self._shake_job = None
+            if i >= len(offsets) or self.rect != (x0, y0, x1, y1):
+                return
+            self.win.geometry(f"+{x0 + offsets[i]:d}+{y0:d}")
+            self._shake_job = self.root.after(35, lambda: step(i + 1))
+
+        if self._shake_job:
+            self.root.after_cancel(self._shake_job)
+        step(0)
+
+    ANIM_MS = 40  # the animation loop's frame time
+
+    def _animate(self) -> None:
+        """The dot's running animations: it pulses while listening (every 10th frame flips it) and, while
+        working, four sparks chase each other round it."""
+        self._tick += 1
+        c = self.canvas
+        if self.state == "listening" and self._tick % 10 == 0:
             self._pulse_on = not self._pulse_on
-            self.canvas.itemconfigure("dot", fill=self.dots["listening"] if self._pulse_on else self._dim_listening)
-        self.root.after(400, self._pulse)
+            c.itemconfigure("dot", fill=self.dots["listening"] if self._pulse_on else self._dim_listening)
+        c.delete("orbit")
+        if self.state == "thinking" and not self._ring_job:
+            x, y, biggest = self._dot_at
+            r = max(7.0, min(11.0, biggest - 3))
+            own = self.dots["thinking"]
+            for k in range(4):
+                a = self._tick * 0.3 - k * 0.75
+                size = 2.8 - 0.55 * k
+                px, py = x + r * math.cos(a), y + r * math.sin(a)
+                c.create_oval(px - size, py - size, px + size, py + size, fill=_mix(own, self.bg, 0.22 * k), outline="",
+                              tags="orbit")
+        self.root.after(self.ANIM_MS, self._animate)
 
     def _keep_on_top(self) -> None:
         """Stay above other windows (re-asserted every second, since the taskbar and Start menu can cover it),

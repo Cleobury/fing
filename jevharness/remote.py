@@ -77,7 +77,7 @@ def _ensure_cert(ip: str) -> None:
             return
     key = ec.generate_private_key(ec.SECP256R1())
     host = socket.gethostname()
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"Jev Harness ({host})")])
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"Fing ({host})")])
     now = datetime.datetime.now(datetime.UTC)
     cert = (
         x509.CertificateBuilder()

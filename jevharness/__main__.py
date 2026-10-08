@@ -8,7 +8,7 @@ import sys
 
 def main() -> None:
     if sys.platform != "win32":
-        sys.exit("Jev Harness runs on Windows 10/11 only (it uses Windows OCR, Win32 input and Credential Manager).")
+        sys.exit("Fing runs on Windows 10/11 only (it uses Windows OCR, Win32 input and Credential Manager).")
 
     # Physical-pixel coordinates everywhere, so OCR boxes, Tk windows and mouse clicks line up on scaled displays.
     if not ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):  # per-monitor v2
@@ -17,10 +17,11 @@ def main() -> None:
     # Our own taskbar identity, so the Settings window shows the app's icon rather than grouping under pythonw.exe.
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("JevHarness.App")
 
+    # (The ids keep the old name, so pinned taskbar icons and a running older copy are still recognised.)
     # One instance only: two keyboard hooks would both react to Right Ctrl.
     ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\JevHarnessSingleInstance")
     if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-        ctypes.windll.user32.MessageBoxW(None, "Jev Harness is already running (see the tray).", "Jev Harness", 0x40)
+        ctypes.windll.user32.MessageBoxW(None, "Fing is already running (see the tray).", "Fing", 0x40)
         return
 
     from .settings import DATA_DIR, LOG_DIR

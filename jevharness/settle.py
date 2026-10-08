@@ -1,7 +1,7 @@
 """When is the screen ready after an action? Frame-by-frame logic for `desktop.wait_until_settled`.
 
 Kept free of Win32 so it can be tested. Frames are coarse grids of pixels ("cells"). The screen is ready
-once nothing that matters has changed for a short quiet spell. What doesn't matter: Jev's own pill and
+once nothing that matters has changed for a short quiet spell. What doesn't matter: Fing's own pill and
 highlight, and anything that was already moving before the action (a video, a spinner, a clock), which
 would otherwise keep every wait running to its timeout.
 """

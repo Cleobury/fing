@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
-    Set up Jev Harness: create the virtual environment, install dependencies and add shortcuts.
+    Set up Fing: create the virtual environment, install dependencies and add shortcuts.
 .PARAMETER Startup
-    Also start Jev Harness automatically when you sign in to Windows.
+    Also start Fing automatically when you sign in to Windows.
 .EXAMPLE
     .\setup.ps1
     .\setup.ps1 -Startup
@@ -23,19 +23,27 @@ Write-Host 'Installing dependencies...'
 # pythonw.exe runs without a console window.
 $shell = New-Object -ComObject WScript.Shell
 $targets = @(
-    (Join-Path $root 'Jev Harness.lnk'),
-    (Join-Path ([Environment]::GetFolderPath('Programs')) 'Jev Harness.lnk')
+    (Join-Path $root 'Fing.lnk'),
+    (Join-Path ([Environment]::GetFolderPath('Programs')) 'Fing.lnk')
 )
-if ($Startup) { $targets += Join-Path ([Environment]::GetFolderPath('Startup')) 'Jev Harness.lnk' }
+if ($Startup) { $targets += Join-Path ([Environment]::GetFolderPath('Startup')) 'Fing.lnk' }
+# Shortcuts from before the app was renamed (Jev Harness): replaced by the ones above.
+foreach ($dir in @($root, [Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('Startup'))) {
+    $old = Join-Path $dir 'Jev Harness.lnk'
+    if (Test-Path $old) {
+        if ($dir -eq [Environment]::GetFolderPath('Startup')) { $targets += Join-Path $dir 'Fing.lnk' }
+        Remove-Item $old
+    }
+}
 foreach ($path in $targets) {
     $lnk = $shell.CreateShortcut($path)
     $lnk.TargetPath = Join-Path $venv 'Scripts\pythonw.exe'
     $lnk.Arguments = '-m jevharness'
     $lnk.WorkingDirectory = $root
     $lnk.IconLocation = Join-Path $root 'jevharness\icon.ico'
-    $lnk.Description = 'Voice control with Jev'
+    $lnk.Description = 'Fing: your desktop assistant'
     $lnk.Save()
     Write-Host "Shortcut: $path"
 }
-Write-Host "`nDone. Start 'Jev Harness' from the Start menu, then right-click its tray icon > Settings to add your TypeSafe API key."
+Write-Host "`nDone. Start 'Fing' from the Start menu, then right-click its tray icon (the hand) > Settings > TypeSafe to add your API key."
 Write-Host 'The first start downloads the Whisper model (~1.6 GB).'

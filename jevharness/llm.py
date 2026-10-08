@@ -306,7 +306,7 @@ class Planner:
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         if provider == "openrouter":
-            headers["X-Title"] = "Jev Harness"
+            headers["X-Title"] = "Fing"
         self.http = httpx.Client(headers=headers, timeout=timeout_s)
 
     @property

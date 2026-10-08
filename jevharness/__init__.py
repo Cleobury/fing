@@ -1,1 +1,1 @@
-"""Voice-driven computer control: push-to-talk -> Whisper -> screen OCR -> Jev decides -> mouse/keyboard."""
+"""Fing: a desktop assistant that uses your computer for you. Voice-driven control: push-to-talk -> Whisper -> screen OCR -> the TypeSafe classifier decides -> mouse/keyboard."""

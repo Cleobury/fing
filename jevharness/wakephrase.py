@@ -1,6 +1,6 @@
 """The wake phrase: spotting it in what Whisper heard, and rating how well a phrase will work.
 
-Whisper has never heard of "Jev", so it writes what it thinks it heard ("hey Jeff", "hey Jeb", "hey Dev").
+Whisper has never heard of "Fing", so it writes what it thinks it heard ("hey thing", "hey Finn", "hey fin").
 The match therefore compares both the letters and a rough sound code (Soundex without the padding) of the
 first few words, and takes the better of the two.
 """
@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
-DEFAULT_PHRASE = "hey jev"
+DEFAULT_PHRASE = "hey fing"
 
 # Everyday words, including the greetings people put in front of a name. A phrase made only of these goes
 # off from ordinary talk, TV and calls.
@@ -57,7 +57,7 @@ def _ratio(a: str, b: str) -> float:
 @dataclass
 class Match:
     score: float  # 0..1, how closely the start of what was heard matches the phrase
-    rest: str  # what was said after the phrase ("open Steam" in "Hey Jev, open Steam")
+    rest: str  # what was said after the phrase ("open Steam" in "Hey Fing, open Steam")
 
 
 def match(phrase: str, heard: str) -> Match:
@@ -68,7 +68,7 @@ def match(phrase: str, heard: str) -> Match:
     n = len(target)
     t_text, t_sound = " ".join(target), " ".join(sound(w) for w in target)
     best, best_end = 0.0, 0
-    for start in range(min(3, len(said))):  # allow a filler first ("so hey Jev", "um hey Jev")
+    for start in range(min(3, len(said))):  # allow a filler first ("so hey Fing", "um hey Fing")
         for size in (n - 1, n, n + 1):
             if size < 1 or start + size > len(said):
                 continue
@@ -124,12 +124,29 @@ class Strength:
     suggestions: list[str]  # stronger phrases to offer as buttons
 
 
-def strength(phrase: str) -> Strength:
-    said = words(phrase)
+def for_name(name: str) -> str:
+    """The wake phrase for an assistant called `name`."""
+    return f"hey {' '.join(words(name)) or 'fing'}"
+
+
+def renamed(phrase: str, old: str, new: str) -> str:
+    """The wake phrase after the assistant is renamed from `old` to `new`: "Hey Fing" becomes "Hey Pointer" if
+    it ended with the old name, or is empty; any other phrase the user chose stays as it is."""
+    said, old_words = words(phrase), words(old)
     if not said:
-        return Strength("weak", "Type the phrase Jev should listen for.", ["Hey Jev", "Okay Jev"])
+        return for_name(new)
+    if old_words and said[-len(old_words):] == old_words:
+        return " ".join(said[:-len(old_words)] + words(new)) or for_name(new)
+    return phrase
+
+
+def strength(phrase: str, assistant: str = "Fing") -> Strength:
+    said = words(phrase)
+    own = " ".join(words(assistant)).title() or "Fing"
+    if not said:
+        return Strength("weak", f"Type the phrase {own} should listen for.", [f"Hey {own}", f"Okay {own}"])
     rare = [w for w in said if w not in COMMON]
-    name = (rare[-1] if rare else "jev").capitalize()
+    name = rare[-1].capitalize() if rare else own
     suggestions = [s for s in (f"Hey {name}", f"Okay {name}", f"Hi {name}")
                    if words(s) != said]
     total = sum(syllables(w) for w in said)
@@ -137,7 +154,7 @@ def strength(phrase: str) -> Strength:
         return Strength("weak", "One word goes off easily in normal talk. Try two words:", suggestions)
     if not rare:
         return Strength("weak", "Everyday words go off easily from TV and calls. Put a name in it:",
-                        ["Hey Jev", "Okay Jev"])
+                        [f"Hey {own}", f"Okay {own}"])
     if len(said) > 4:
         return Strength("ok", "Long phrases are hard to say the same way every time. Two or three words work best.", [])
     if total >= 4:
