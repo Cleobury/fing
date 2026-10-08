@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-d = pytest.importorskip("jevharness.decide")  # needs typesafe-sdk
+d = pytest.importorskip("fing.decide")  # needs typesafe-sdk
 
 
 def el(id, text, left, top, w=120, h=30):

@@ -57,6 +57,8 @@ from .listen import Listener
 from .scripts import Script, breakdown_key, check_of, load_scripts, save_scripts, split_lines, wait_of, write_report
 from .llm import PROVIDERS, Planner
 from .search import valid_hotkey
+from .brand import ICON_PATH
+from .fx import Fx
 from .overlay import Highlight, Overlay
 from .settings import LOG_DIR, Settings, get_api_key
 from .remote import RemoteServer
@@ -75,7 +77,6 @@ SAMPLE_RATE = 16000
 log = logging.getLogger(__name__)
 
 HOTKEY = "right ctrl"
-ICON_PATH = os.path.join(os.path.dirname(__file__), "icon.ico")
 MIN_AUDIO_S = 0.35  # shorter presses are treated as taps and ignored
 PHONE_TIMEOUT_S = 75  # a phone recording that never ended (the longest clip is 60 s) stops blocking Right Ctrl
 MIN_RMS = 0.002  # below this the clip is silence
@@ -224,6 +225,8 @@ class App:
         self.overlay.on_check = self._user_marked_done
         self.apply_overlay_style()
         self.highlight = Highlight(self.root)
+        self.fx = Fx(self.root)  # the hand: taps what it clicks, waves hello, throws confetti when done
+        self.fx.enabled = self.settings.overlay_fx
         self.root.update()  # draw "Loading speech model…" before blocking on the load
 
         # Whisper must load on this thread before anything else touches COM (Windows OCR,
@@ -252,7 +255,9 @@ class App:
             self.status("warn", "CUDA unavailable: transcribing on CPU (slow)", 5000)
         elif self.model_ready and self.decider:
             # Say how to use it once, then shrink to the idle dot.
-            self.overlay.show(self.overlay.idle_state, "Jev ready · " + self._talk_hint() + self._dry_run_note(), 5000)
+            self.overlay.show(self.overlay.idle_state, f"{self.settings.name} ready · " + self._talk_hint()
+                              + self._dry_run_note(), 5000)
+            self.root.after(150, self._wave)
         self.remote: RemoteServer | None = None
         self._apply_remote()
         self._pump()
@@ -281,8 +286,23 @@ class App:
         # While a command is running, offer ✓ "it's done" so the user can stop it once it has succeeded.
         check = self.busy and not self._cancel.is_set() and state in ("thinking", "done", "question")
         self.ui(self.overlay.show, state, text, hold_ms, check)
+        if state == "error":
+            self.ui(self.overlay.shake)
         if self.tray:
             self.tray.set_state({"listening": "listening", "thinking": "thinking", "error": "error"}.get(state, "idle"))
+
+    def _wave(self) -> None:
+        """Tk thread: a big hand waves hello in the middle of the screen."""
+        self.fx.hello()
+
+    def _celebrate(self) -> None:
+        """Any thread: confetti from the indicator's dot (a request is done)."""
+        self.ui(lambda: self.fx.celebrate(*self.overlay.dot_screen()))
+
+    def _capture(self, **kw) -> Screen:
+        """Read the screen (leaving out the indicator), without the hand in the way of what's being read."""
+        self.fx.cut()
+        return self.perception.capture([self.overlay.rect], **kw)
 
     def status_line(self) -> str:
         return self._last_status[:60]
@@ -388,6 +408,8 @@ class App:
     def apply_overlay_style(self, s: Settings | None = None) -> None:
         """Colour and opacity of the indicator, from `s` (e.g. a live preview) or the saved settings."""
         s = s or self.settings
+        if hasattr(self, "fx"):
+            self.fx.enabled = s.overlay_fx
         self.overlay.apply_style(s.overlay_bg, s.overlay_fg, s.overlay_opacity, s.overlay_dots)
         self.overlay.set_position(s.overlay_position, s.overlay_x, s.overlay_y)
 
@@ -414,6 +436,7 @@ class App:
         if self.recorder:
             self.recorder.set_device(self.settings.mic_device)
         self._apply_listener()
+        self.tray.rename(self.settings.name)
         if self.perception:
             self.perception.use_controls = self.settings.read_controls
             self.perception.all_screens = self.settings.all_screens
@@ -557,7 +580,7 @@ class App:
             self.recorder.start()
         if self._question is None:
             # OCR runs while the user is still speaking, so it's ready by the time they let go.
-            self._ocr_future = self._ocr_pool.submit(self.perception.capture, [self.overlay.rect])
+            self._ocr_future = self._ocr_pool.submit(self._capture)
         if source == "auto":
             self.status("listening", self._question_prompt())  # keep the options in view while it listens
         else:
@@ -690,6 +713,7 @@ class App:
     def remote_status(self) -> dict:
         q = self._question
         return {
+            "name": self.settings.name,
             "state": self.overlay.state,
             "text": self.overlay.text,
             "busy": self.busy,
@@ -807,7 +831,7 @@ class App:
                 # Out of steps. Requests often imply more than was said ("open YouTube in Brave" is also "go to
                 # YouTube"), so check the result against the screen, and work out what's still needed if it isn't done.
                 if not fresh:
-                    screen = self.perception.capture([self.overlay.rect], follow="foreground")
+                    screen = self._capture(follow="foreground")
                 fresh = True
                 last = journal.unverified_action()
                 p_done, worked = self.decider.is_done(command, journal.done_for_jev(), screen, last)
@@ -816,6 +840,7 @@ class App:
                 journal.add("check", p=round(p_done, 2))
                 entry.setdefault("done_checks", []).append(round(p_done, 2))
                 if p_done >= DONE_THRESHOLD:
+                    self._celebrate()
                     break
                 seen = (screen.window_title, frozenset(e.text for e in screen.elements))
                 stuck = stuck + 1 if seen == last_seen else 0
@@ -856,7 +881,7 @@ class App:
                     fresh = False
                     continue
                 if not fresh:
-                    screen = self.perception.capture([self.overlay.rect], follow="foreground")
+                    screen = self._capture(follow="foreground")
                 fresh = False
                 context = {"full_request": command, "steps_done": journal.done_for_jev(), "recent_actions": recent}
                 if last := journal.unverified_action():
@@ -887,7 +912,7 @@ class App:
                         entry.setdefault("irreversible_checks", []).append({"action": p.description, "p": round(risk, 2)})
                         if risk > IRREVERSIBLE:
                             self._fail(f"{self._auto_name}: “{p.description}” looks hard to undo, so I stopped "
-                                       "(allow it in Settings → Jev)")
+                                       "(allow it in Settings → General)")
                             if results:
                                 results[-1].update(status="failed", note=f'stopped before "{p.description}": looks hard to undo')
                             break
@@ -903,7 +928,7 @@ class App:
                     self._recent.append((time.monotonic(), p.description))
                     self.status("done", f"{label}{p.description}", 3000)
                     self._let_screen_catch_up(p, before, moving, existing, label)
-                    after = self.perception.capture([self.overlay.rect], follow="foreground")
+                    after = self._capture(follow="foreground")
                     event["change"] = describe_change(out.screen, after)
                     screen, fresh = after, True
                     continue
@@ -977,6 +1002,7 @@ class App:
         if self._cancel.is_set() and self._marked_done:
             entry["marked_done_by_user_after"] = len(done)
             self.status("done", "Done ✓", 2500)  # in case a late step message replaced it
+            self._celebrate()
         elif self._cancel.is_set():
             self.status("warn", f"Stopped after {len(done)} step{'s' * (len(done) != 1)}", 3000)
             entry["cancelled_after"] = len(done)
@@ -1035,7 +1061,7 @@ class App:
             except Exception as e:
                 log.exception("AI planner failed")
                 entry["replans"].append({"problem": problem, "error": repr(e)})
-                self.status("warn", f"AI planner failed ({str(e)[:60]}): carrying on with Jev", 3000)
+                self.status("warn", f"AI planner failed ({str(e)[:60]}): carrying on without it", 3000)
                 return PLANNER_ERROR
             entry["replans"].append({"problem": problem, "ms": round((time.perf_counter() - t) * 1000),
                                      "understanding": lp.understanding, "steps": lp.steps, "question": lp.question})
@@ -1119,7 +1145,7 @@ class App:
             self._execute(Plan(True, f'Click "{nav.text[:50]}"', kind="click", target=nav))
             self.status("thinking", f'{label}Not here: trying "{nav.text[:40]}"')
             self._settle(6, SLOW_QUIET_S, moving)
-            looked_from, screen = screen, self.perception.capture([self.overlay.rect], follow="foreground")
+            looked_from, screen = screen, self._capture(follow="foreground")
             self._journal.add("look", what=f'clicked "{nav.text[:40]}" to look for what "{step[:40]}" needs',
                               result=describe_change(looked_from, screen))
 
@@ -1166,7 +1192,7 @@ class App:
 
         # 1. Closer looks: more OCR passes over the same screen, merged, checked once.
         def look(**kw) -> list[Element]:
-            return self.perception.capture([self.overlay.rect], follow="foreground", **kw).elements
+            return self._capture(follow="foreground", **kw).elements
 
         self.status("thinking", f"{label}Exploring: looking closer…")
         closer = merge_elements(screen, look(scale=2.0))
@@ -1203,7 +1229,7 @@ class App:
                     self._executing = False
                 actions += 1
                 self._settle(1.5)
-                after = self.perception.capture([self.overlay.rect], follow="foreground")
+                after = self._capture(follow="foreground")
                 if seen(after) == seen(current):
                     break  # nothing scrolled
                 scrolled += 1
@@ -1218,7 +1244,7 @@ class App:
                 finally:
                     self._executing = False
                 self._settle(1.5)
-                screen = merge_elements(self.perception.capture([self.overlay.rect], follow="foreground"), closer.elements) \
+                screen = merge_elements(self._capture(follow="foreground"), closer.elements) \
                     if seen(current) != seen(screen) else screen
 
         # 3. Look at the screenshot: the vision model points out icons, images and colours OCR can't read, and
@@ -1258,11 +1284,11 @@ class App:
                     continue
                 actions += 1
                 if probe.get("action") == "zoom":
-                    zoomed = self.perception.capture([self.overlay.rect], follow="foreground", scale=3.0, region=probe.get("region"))
+                    zoomed = self._capture(follow="foreground", scale=3.0, region=probe.get("region"))
                     after = merge_elements(current, zoomed.elements)
                 else:
                     self._settle(3)
-                    after = self.perception.capture([self.overlay.rect], follow="foreground")
+                    after = self._capture(follow="foreground")
                 if found := check(after, desc):
                     return found
                 changed = seen(after) != seen(current)
@@ -1365,7 +1391,7 @@ class App:
         entry.setdefault("results", [])
         entry.setdefault("replans", [])
         self.status("thinking", f'Running "{script.name}" ({len(steps)} steps)…')
-        screen = screen or self.perception.capture([self.overlay.rect], follow="foreground")
+        screen = screen or self._capture(follow="foreground")
         self._script = script
         planner_autonomous = self.planner.autonomous if self.planner else False
         if self.planner and script.unattended:
@@ -1403,6 +1429,8 @@ class App:
         except OSError:
             log.exception("Couldn't save the script report")
         entry["script_summary"] = summary
+        if not failed:
+            self._celebrate()
         (self._fail if failed else lambda t: self.status("done", t, 6000))(f'Script "{script.name}": {summary}')
 
     def run_script(self, name: str) -> None:
@@ -1447,7 +1475,7 @@ class App:
         """A "check: …" step: does `condition` hold on screen? If not at first, give the screen a few seconds to
         change (it may still be loading) and look again. Returns (passed, probability, the screen judged)."""
         self.status("thinking", f"{label}Checking: {condition}")
-        screen = self.perception.capture([self.overlay.rect], follow="foreground")
+        screen = self._capture(follow="foreground")
         p_holds = self.decider.check(condition, screen)
         if p_holds < CHECK_PASS:
             changed = self._wait_for_change(screen, time.monotonic() + CHECK_WAIT_S, label)
@@ -1462,10 +1490,10 @@ class App:
         before = (screen.window_title, {e.text for e in screen.elements})
         while time.monotonic() < until and not self._cancel.is_set():
             time.sleep(0.5)
-            now = self.perception.capture([self.overlay.rect], follow="foreground")
+            now = self._capture(follow="foreground")
             if (now.window_title, {e.text for e in now.elements}) != before:
                 self._settle(max(0.5, min(2.0, until - time.monotonic())))
-                return self.perception.capture([self.overlay.rect], follow="foreground")
+                return self._capture(follow="foreground")
         return None
 
     def _let_screen_catch_up(self, p: Plan, before: int, moving=None, existing: set[int] = frozenset(),
@@ -1489,12 +1517,14 @@ class App:
         self._settle(6 if slow else 2, SLOW_QUIET_S if slow else QUICK_QUIET_S, moving)
 
     def _settle(self, timeout_s: float, quiet_s: float = QUICK_QUIET_S, moving=None) -> None:
-        """Wait until the screen is ready (see `wait_until_settled`), not counting Jev's own pill and highlight."""
-        wait_until_settled(timeout_s, self._cancel.is_set, quiet_s, lambda: (self.overlay.rect, self.highlight.rect), moving)
+        """Wait until the screen is ready (see `wait_until_settled`), not counting Fing's own pill, highlight and hand."""
+        wait_until_settled(timeout_s, self._cancel.is_set, quiet_s,
+                           lambda: (self.overlay.rect, self.highlight.rect, self.fx.rect), moving)
 
     def _fail(self, text: str) -> None:
         winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
         self.status("warn", text, 6000)
+        self.ui(self.overlay.shake)
 
     def _question_prompt(self) -> str:
         """The question box: the question, then each option numbered on its own line, then how to answer."""
@@ -1527,6 +1557,7 @@ class App:
         if not (auto_pc and self.settings.mic_sounds):
             self._chime("question")  # (when the mic opens for the answer, its own chime says so)
         self.ui(self.highlight.mark, q.rects, None)
+        self.ui(self.fx.hop, [(l - Highlight.PAD - Highlight.BADGE // 2, t - Highlight.PAD) for l, t, _, _ in q.rects])
         self.status("question", self._question_prompt() if not label else label + self._question_prompt())
         self._question_n += 1
         if auto_pc:
@@ -1562,7 +1593,7 @@ class App:
             record["answer"] = f"key {idx + 1}"
         else:
             answer = self.transcriber.transcribe(value, [clean_span(o) for o, _ in options])
-            if self.settings.wake_enabled:  # "Hey Jev, two"
+            if self.settings.wake_enabled:  # "Hey Fing, two"
                 answer = wakephrase.strip(self.settings.wake_phrase, answer, self.settings.wake_sensitivity)
             record["answer"] = answer
             if not answer:
@@ -1636,6 +1667,7 @@ class App:
             self._executing = False
         if p.target:
             self.ui(self.highlight.flash, p.target.rect, 500)
+            self.ui(self.fx.tap, *p.target.center)
 
     def _user_marked_done(self) -> None:
         """✓ clicked on the indicator: the task has succeeded, so stop working on it (like Esc, but a success)."""
@@ -1645,6 +1677,7 @@ class App:
         self._cancel.set()
         winsound.MessageBeep(winsound.MB_OK)
         self.overlay.show("done", "Done ✓", 2500)
+        self.fx.celebrate(*self.overlay.dot_screen())
 
     def _recent_actions(self) -> list[str]:
         """Actions from the last couple of minutes, so follow-ups like "now search for dogs" have context."""

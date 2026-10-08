@@ -168,6 +168,19 @@ def monitor_bounds(x: int, y: int) -> tuple[int, int, int, int]:
     return m.left, m.top, m.right, m.bottom
 
 
+def monitor_scale(x: int, y: int) -> float:
+    """The display scaling of the monitor containing (x, y): 1.0 at 100%, 2.0 at 200%. Monitors can be set to
+    different scalings, so anything drawn in screen pixels asks for the one it will appear on."""
+    dpi = wintypes.UINT()
+    monitor = _user32.MonitorFromPoint(wintypes.POINT(x, y), 2)
+    try:  # MDT_EFFECTIVE_DPI
+        if ctypes.windll.shcore.GetDpiForMonitor(monitor, 0, ctypes.byref(dpi), ctypes.byref(wintypes.UINT())) == 0:
+            return max(1.0, dpi.value / 96)
+    except (AttributeError, OSError):
+        pass
+    return 1.0
+
+
 def fullscreen_at(x: int, y: int) -> bool:
     """Whether the active window covers the whole monitor containing (x, y): exclusive fullscreen games,
     borderless "windowed fullscreen", fullscreen video. The desktop itself doesn't count."""

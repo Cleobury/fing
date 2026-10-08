@@ -1,6 +1,6 @@
 import numpy as np
 
-from jevharness import settle as s
+from fing import settle as s
 
 
 def grid(fill=0, h=40, w=60):
@@ -32,7 +32,7 @@ def test_a_caret_sized_change_is_noise():
 
 
 def test_ignored_cells_dont_hold_it_up():
-    """Jev's own pill and highlight, or a video that was already playing."""
+    """Fing's own pill and highlight, or a video that was already playing."""
     w = s.Settle(0.2)
     ignore = s.rect_mask((40, 60), 0, 0, [(0, 0, 10 * s.STRIDE, 10 * s.STRIDE)])
     a, b = grid(), grid()

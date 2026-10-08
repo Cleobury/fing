@@ -12,6 +12,7 @@ import io
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -28,6 +29,14 @@ PROVIDERS = {
 }
 # OpenRouter's Auto Router: it picks a model per request (standard price of whichever model it picks, no extra fee).
 OPENROUTER_AUTO = "openrouter/auto"
+
+# Replies are a few short JSON fields, so keep them small: a long reply (or a model that deliberates first) is
+# most of the wait. These caps include any thinking the model still does; a reply cut off by one is retried once
+# with double the room.
+PLAN_TOKENS = 700
+EXPLORE_TOKENS = 450
+LOCATE_TOKENS = 350
+HISTORY_LIMIT = 12  # most recent history lines sent with each call
 
 SYSTEM = """You help a voice-controlled computer assistant. A fast executor carries out one simple step at a time: it reads the
 text visible on screen (OCR) and matches each step to it. It gets confused by casual speech, implied steps, or requests
@@ -63,7 +72,9 @@ Rules:
 - If the request already looks done, return no steps and no question.
 - `history` is everything done so far for this request, with what changed on screen and whether it worked. Build
   on what worked; don't repeat actions that failed or changed nothing; try a different route instead.
-- `understanding`: one short sentence restating the goal."""
+- `understanding`: the goal in under 12 words.
+- Be quick and terse: answer straight away without deliberating, use short labels, and return at most 8 steps
+  (the executor asks again if more are needed)."""
 
 SCHEMA = {
     "type": "object",
@@ -116,7 +127,8 @@ Rules:
   they worked, earlier plans): use it too.
 - Never click anything that deletes, removes, uninstalls, buys, pays, sends, posts, signs out, or changes security
   or privacy settings.
-- `thinking`: one short sentence on where you expect to find it."""
+- `thinking`: where you expect to find it, in under 12 words. Each probe's `reason`: under 8 words.
+- Be quick and terse: answer straight away without deliberating."""
 
 EXPLORE_SCHEMA = {
     "type": "object",
@@ -144,7 +156,7 @@ EXPLORE_SCHEMA = {
 }
 
 
-def describe_elements(screen: Screen, limit: int = 250) -> list[dict]:
+def describe_elements(screen: Screen, limit: int = 160) -> list[dict]:
     """Screen elements for the AI: id, text, the control kind if UI Automation named it, and position (a region
     name, with which screen when there are several, plus the centre in pixels from the screenshot's top-left)."""
     whole = screen.monitor
@@ -155,7 +167,7 @@ def describe_elements(screen: Screen, limit: int = 250) -> list[dict]:
         h = ("left", "centre", "right")[min(2, max(0, 3 * (cx - mon["left"]) // mon["width"]))]
         v = ("top", "middle", "bottom")[min(2, max(0, 3 * (cy - mon["top"]) // mon["height"]))]
         where = f"{v} {h}" + (f" of the {name}" if (name := screen.screen_name(mon)) else "")
-        out.append({"id": e.id, "text": e.text[:80], **({"kind": e.kind} if e.kind else {}), "where": where,
+        out.append({"id": e.id, "text": e.text[:60], **({"kind": e.kind} if e.kind else {}), "where": where,
                     "x": cx - whole["left"], "y": cy - whole["top"]})
     return out
 
@@ -306,7 +318,7 @@ class Planner:
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         if provider == "openrouter":
-            headers["X-Title"] = "Jev Harness"
+            headers["X-Title"] = "Fing"
         self.http = httpx.Client(headers=headers, timeout=timeout_s)
 
     @property
@@ -318,7 +330,7 @@ class Planner:
         context = {
             "request": request,
             "steps_done": steps_done,
-            "history": list(history),
+            "history": list(history)[-HISTORY_LIMIT:],
             "problem": problem,
             "active_window": screen.window_title,
             **({"screens": screens} if (screens := describe_screens(screen)) else {}),
@@ -332,6 +344,7 @@ class Planner:
             "model": self.model,
             "messages": [{"role": "system", "content": SYSTEM + self._autonomy_rules()}, {"role": "user", "content": content}],
             "temperature": 0.2,
+            "max_tokens": PLAN_TOKENS,
             "response_format": {"type": "json_schema", "json_schema": {"name": "plan", "strict": True, "schema": SCHEMA}},
         }
         if self.provider == "openrouter":
@@ -419,7 +432,7 @@ class Planner:
             "step": step,
             "full_request": request,
             "steps_done": done,
-            "history": list(history),
+            "history": list(history)[-HISTORY_LIMIT:],
             "active_window": screen.window_title,
             "screen_size": [screen.monitor["width"], screen.monitor["height"]],
             **({"screens": screens} if (screens := describe_screens(screen)) else {}),
@@ -433,6 +446,7 @@ class Planner:
             "model": self.model,
             "messages": [{"role": "system", "content": EXPLORE_SYSTEM + self._explore_permission()}, {"role": "user", "content": content}],
             "temperature": 0.3,
+            "max_tokens": EXPLORE_TOKENS,
             "response_format": {"type": "json_schema", "json_schema": {"name": "explore", "strict": True, "schema": EXPLORE_SCHEMA}},
         }
         if self.provider == "openrouter":
@@ -458,6 +472,7 @@ class Planner:
                                              {"type": "image_url", "image_url": {"url": url}}]},
             ],
             "temperature": 0.1,
+            "max_tokens": LOCATE_TOKENS,
             "response_format": {"type": "json_schema", "json_schema": {"name": "locate", "strict": True, "schema": LOCATE_SCHEMA}},
         }
         if self.provider == "openrouter":
@@ -522,13 +537,35 @@ class Planner:
         return [c for c in (to_command(s) for s in data.get("steps") or []) if c]
 
     def _chat(self, body: dict, schema: dict = SCHEMA) -> dict:
+        t = time.perf_counter()
+        try:
+            data, cut = self._chat_once(body, schema)
+            if cut:  # ran out of room before the JSON finished: one more go with twice the room
+                log.info("AI reply was cut off at %s tokens; retrying with more room", body["max_tokens"])
+                data, _ = self._chat_once({**body, "max_tokens": body["max_tokens"] * 2}, schema)
+            return data
+        finally:
+            log.info("AI call (%s) took %.1f s", (body.get("response_format") or {}).get("json_schema", {}).get("name", "chat"),
+                     time.perf_counter() - t)
+
+    def _chat_once(self, body: dict, schema: dict) -> tuple[dict, bool]:
+        """One request. Returns (reply JSON, whether it was cut off by max_tokens before the JSON was complete)."""
+        body = dict(body)
+        # Without a cap OpenRouter reserves the model's whole output limit against the balance (e.g. 65536 tokens for
+        # Sonnet), and a low balance then fails with 402.
+        body.setdefault("max_tokens", 2048)
         if self.keep_alive:
             return self._ollama_chat(body, schema)
-        if self.provider == "openrouter":
-            # Replies are small JSON. Without a cap OpenRouter reserves the model's whole output limit against the
-            # balance (e.g. 65536 tokens for Sonnet), and a low balance then fails with 402.
-            body.setdefault("max_tokens", 2048)
+        if self.provider == "openrouter" and "reasoning" not in body:
+            # Thinking models (often what the Auto Router picks) can deliberate for half a minute before a reply this
+            # simple; ask for as little as the model allows, and don't send the thinking back.
+            body["reasoning"] = {"effort": "low", "exclude": True}
         r = self.http.post(f"{self.base_url}/chat/completions", json=body)
+        if r.status_code in (400, 404) and "reasoning" in body:
+            # No endpoint for this model takes the reasoning setting (require_parameters): ask without it.
+            log.info("Reasoning setting rejected (%s); retrying without it", r.text[:200])
+            body.pop("reasoning")
+            r = self.http.post(f"{self.base_url}/chat/completions", json=body)
         if r.status_code == 400 and "response_format" in body:
             # Local/older models may reject JSON-schema mode: fall back to plain JSON mode, then prompt-only.
             log.info("Structured output rejected (%s); retrying in JSON mode", r.text[:200])
@@ -543,7 +580,17 @@ class Planner:
         reply = r.json()
         if self.model == OPENROUTER_AUTO:
             log.info("Auto Router picked %s", reply.get("model"))
-        return _parse_json(reply["choices"][0]["message"]["content"])
+        choice = reply["choices"][0]
+        return self._parse_reply(choice["message"].get("content") or "", choice.get("finish_reason") == "length")
+
+    @staticmethod
+    def _parse_reply(content: str, hit_limit: bool) -> tuple[dict, bool]:
+        try:
+            return _parse_json(content), False
+        except ValueError:
+            if hit_limit:
+                return {}, True
+            raise
 
     def _ollama_chat(self, body: dict, schema: dict = SCHEMA) -> dict:
         """The same request through Ollama's native /api/chat, which honours keep_alive."""
@@ -558,16 +605,22 @@ class Planner:
                 "content": "\n".join(p["text"] for p in parts if p["type"] == "text"),
                 "images": [p["image_url"]["url"].split(",", 1)[1] for p in parts if p["type"] == "image_url"],
             })
-        r = self.http.post(f"{self._ollama_root}/api/chat", json={
+        req = {
             "model": self.model,
             "messages": messages,
             "stream": False,
             "format": schema,
             "keep_alive": -1,
-            "options": {"temperature": body.get("temperature", 0.2)},
-        })
+            "think": False,  # thinking models answer straight away; the rest ignore it
+            "options": {"temperature": body.get("temperature", 0.2), "num_predict": body["max_tokens"]},
+        }
+        r = self.http.post(f"{self._ollama_root}/api/chat", json=req)
+        if r.status_code == 400:  # an older Ollama that doesn't know `think`
+            req.pop("think")
+            r = self.http.post(f"{self._ollama_root}/api/chat", json=req)
         r.raise_for_status()
-        return _parse_json(r.json()["message"]["content"])
+        reply = r.json()
+        return self._parse_reply(reply["message"].get("content") or "", reply.get("done_reason") == "length")
 
     def list_vision_models(self) -> list[str]:
         """Models that accept images: for Ollama, those with the "vision" capability."""

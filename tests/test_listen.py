@@ -1,7 +1,7 @@
 import numpy as np
 
-from jevharness import listen
-from jevharness.listen import FRAME, RATE, Listener, SpeechGate, Utterance
+from fing import listen
+from fing.listen import FRAME, RATE, Listener, SpeechGate, Utterance
 
 
 def quiet(seconds):
@@ -56,7 +56,7 @@ def run(lst, frames):
 
 
 def test_phrase_and_command_in_one_breath_is_one_command():
-    lst, got = make("Hey Jev, open Steam.")
+    lst, got = make("Hey Fing, open Steam.")
     run(lst, quiet(0.5) + loud(1.5) + quiet(1.0))
     assert len(got["wake"]) == 1 and len(got["heard"]) == 1
     token, audio = got["heard"][0]
@@ -64,7 +64,7 @@ def test_phrase_and_command_in_one_breath_is_one_command():
 
 
 def test_phrase_then_pause_waits_for_the_command():
-    lst, got = make("Hey Jev.")
+    lst, got = make("Hey Fing.")
     run(lst, quiet(0.5) + loud(0.6) + quiet(1.0))
     assert len(got["wake"]) == 1 and not got["heard"]  # still waiting for the command
     lst.transcriber.text = "should not be asked again"
@@ -81,7 +81,7 @@ def test_other_speech_triggers_nothing():
 
 
 def test_nothing_is_transcribed_while_not_allowed():
-    lst, got = make("Hey Jev", allowed=False)
+    lst, got = make("Hey Fing", allowed=False)
     run(lst, quiet(0.5) + loud(1.0) + quiet(1.0))
     assert lst.transcriber.calls == 0 and not got["wake"]
 
@@ -113,10 +113,10 @@ def test_cancelled_capture_reports_nothing():
 
 
 def test_test_mode_reports_without_triggering():
-    lst, got = make("Hey Jev")
+    lst, got = make("Hey Fing")
     lst.wake_enabled = False
     seen = []
-    lst.test_phrase, lst.on_test = "hey jev", lambda heard, score: seen.append((heard, score))
+    lst.test_phrase, lst.on_test = "hey fing", lambda heard, score: seen.append((heard, score))
     run(lst, quiet(0.5) + loud(1.0) + quiet(1.0))
     assert seen and seen[0][1] > 0.9 and not got["wake"]
 

@@ -1,4 +1,4 @@
-# Jev Harness: Windows 10/11, Python 3.14, NVIDIA GPU (CUDA 12) for Whisper.
+# Fing: Windows 10/11, Python 3.14, NVIDIA GPU (CUDA 12) for Whisper.
 
 # Decisions
 typesafe-sdk==0.7.2

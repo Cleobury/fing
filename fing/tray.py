@@ -4,36 +4,23 @@ import os
 import threading
 
 import pystray
-from PIL import Image, ImageDraw, ImageFont
-
-from . import autostart
+from . import autostart, brand
 from .scripts import load_scripts
 from .settings import LOG_DIR
 
 
-def _icon(color: str) -> Image.Image:
-    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.ellipse((2, 2, 62, 62), fill="#202124", outline=color, width=5)
-    try:
-        font = ImageFont.truetype("segoeuib.ttf", 34)
-    except OSError:
-        font = ImageFont.load_default()
-    d.text((32, 33), "J", fill="#f1f3f4", font=font, anchor="mm")
-    return img
-
-
-ICONS = {"idle": "#80868b", "listening": "#ff3b30", "thinking": "#fbbc04", "error": "#ea4335"}
+# The logo; a coloured ring round it says what Fing is doing (none while idle).
+ICONS = {"idle": None, "listening": "#ff3b30", "thinking": "#fbbc04", "error": "#ea4335"}
 
 
 class Tray:
     def __init__(self, app):
         self.app = app
-        self._images = {k: _icon(v) for k, v in ICONS.items()}
+        self._images = {k: brand.logo(64, ring=v) for k, v in ICONS.items()}
         self.icon = pystray.Icon(
-            "JevHarness",
+            "JevHarness",  # the id stays the same, so Windows keeps the tray icon where the user put it
             self._images["idle"],
-            "Jev Harness",
+            app.settings.name,
             menu=pystray.Menu(
                 pystray.MenuItem(lambda _: app.status_line(), None, enabled=False),
                 pystray.Menu.SEPARATOR,
@@ -68,6 +55,9 @@ class Tray:
 
     def set_state(self, state: str) -> None:
         self.icon.icon = self._images.get(state, self._images["idle"])
+
+    def rename(self, name: str) -> None:
+        self.icon.title = name
 
     def refresh(self) -> None:
         self.icon.update_menu()

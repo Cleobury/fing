@@ -1,9 +1,9 @@
-"""Hands-free listening: the wake word, and answering Jev's questions without holding Right Ctrl.
+"""Hands-free listening: the wake word, and answering Fing's questions without holding Right Ctrl.
 
 The Listener reads the same always-open mic stream as push-to-talk (see Recorder.add_listener), so nothing
 else opens the mic. It works on 30 ms frames:
 
-  spot     While the wake word is on and Jev is idle, each stretch of speech (up to SPOT_WINDOW_S of it) is
+  spot     While the wake word is on and Fing is idle, each stretch of speech (up to SPOT_WINDOW_S of it) is
            transcribed by the already-loaded Whisper model and checked for the phrase (wakephrase.match).
            On a hit the rest of that stretch, and anything said right after it, becomes the command.
   capture  Record one utterance hands-free and hand it to the app: after a wake word, or when a question is
@@ -42,7 +42,7 @@ PREROLL_S = 0.3  # kept from before speech starts, so the first syllable isn't l
 END_SILENCE_S = 0.8  # quiet that ends an utterance
 SPOT_WINDOW_S = 2.5  # how much of a stretch of speech is checked for the wake phrase
 SPOT_MIN_S = 0.25  # shorter blips aren't worth transcribing
-WAKE_FOLLOW_S = 6.0  # after just the phrase ("Hey Jev" … pause), how long to wait for the command
+WAKE_FOLLOW_S = 6.0  # after just the phrase ("Hey Fing" … pause), how long to wait for the command
 MAX_CAPTURE_S = 30.0
 MIN_SPEECH_RMS = 0.005  # nothing quieter than this counts as speech, however quiet the room
 
@@ -101,7 +101,7 @@ class Utterance:
 class _Capture:
     token: int
     timeout_s: float  # give up if speech hasn't started this long after listening begins
-    not_before: float  # ignore the mic until then (e.g. Jev's own question beep)
+    not_before: float  # ignore the mic until then (e.g. Fing's own question beep)
     prefix: np.ndarray = field(default_factory=lambda: np.zeros(0, np.float32))  # the wake phrase, already said
     utt: Utterance = field(default_factory=Utterance)
     began: float | None = None
@@ -127,7 +127,7 @@ class Listener:
         self._lock = threading.Lock()
         self._token = 0
         self._capture: _Capture | None = None
-        self._mute_until = 0.0  # Jev's own chime is playing: don't take it for speech
+        self._mute_until = 0.0  # Fing's own chime is playing: don't take it for speech
         self._pending = np.zeros(0, np.float32)
         self._gate = SpeechGate()
         self._spot = Utterance(end_silence_s=0.5)
@@ -159,7 +159,7 @@ class Listener:
             self._capture = None
 
     def mute(self, seconds: float) -> None:
-        """Ignore the mic for a moment (one of Jev's chimes is playing). Speech already under way carries on."""
+        """Ignore the mic for a moment (one of Fing's chimes is playing). Speech already under way carries on."""
         self._mute_until = time.monotonic() + seconds
 
     @property
@@ -239,7 +239,7 @@ class Listener:
             self.cancel()
             return
         if ended and m.rest:
-            self._finish(cap, cap.utt.audio())  # "Hey Jev, open Steam" then quiet: that's the whole command
+            self._finish(cap, cap.utt.audio())  # "Hey Fing, open Steam" then quiet: that's the whole command
         self._spot, self._spot_checked = Utterance(end_silence_s=0.5), False
 
     @staticmethod

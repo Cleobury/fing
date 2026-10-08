@@ -9,8 +9,26 @@ from dataclasses import asdict, dataclass, field, fields
 
 import keyring
 
-APP_NAME = "JevHarness"
-DATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
+from .brand import DEFAULT_NAME
+
+APP_NAME = "Fing"
+OLD_APP_NAME = "JevHarness"  # the app's name before the rebrand: its data folder and saved keys are moved over
+_APPDATA = os.environ.get("APPDATA", os.path.expanduser("~"))
+
+
+def _data_dir() -> str:
+    """%APPDATA%\\Fing, moving %APPDATA%\\JevHarness there the first time. If the move fails (a file is open),
+    the old folder is used as it is and the move is tried again next start."""
+    new, old = os.path.join(_APPDATA, APP_NAME), os.path.join(_APPDATA, OLD_APP_NAME)
+    if os.path.isdir(old) and not os.path.exists(new):
+        try:
+            os.rename(old, new)
+        except OSError:
+            return old
+    return new
+
+
+DATA_DIR = _data_dir()
 LOG_DIR = os.path.join(DATA_DIR, "logs")
 SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
 
@@ -22,12 +40,14 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class Settings:
+    # What the assistant is called: on the indicator, in Settings, and in the wake phrase ("Hey Fing").
+    assistant_name: str = DEFAULT_NAME
     dry_run: bool = False
     # YOLO mode: decide everything without asking (top option, AI's choice, no "keep going?" check-ins).
     yolo: bool = False
     yolo_allow_irreversible: bool = False  # in YOLO mode, also allow deleting, buying, sending, signing out...
-    model: str = "jev-latest"
-    # Minimum probability of Jev's chosen action / on-screen target before we act.
+    model: str = "jev-latest"  # the TypeSafe classifier model
+    # Minimum probability of the classifier's chosen action / on-screen target before we act.
     min_action_prob: float = 0.5
     min_target_prob: float = 0.4
     # Also read the active window's named controls (icon buttons, tabs, fields) from Windows UI Automation.
@@ -39,7 +59,7 @@ class Settings:
     mic_device: str = ""  # input device name; blank = the Windows default microphone
     # Hands-free: say a phrase instead of holding Right Ctrl (see listen.py).
     wake_enabled: bool = False
-    wake_phrase: str = "hey jev"
+    wake_phrase: str = "hey fing"
     wake_sensitivity: float = 0.5  # 0 = strict (fewer false triggers) … 1 = loose (catches more)
     # Continuous conversation: open the mic by itself when Jev asks a question (on the phone too, if it asked there).
     auto_listen_answers: bool = False
@@ -68,6 +88,11 @@ class Settings:
     overlay_position: str = "bottom-centre"  # a preset on the main screen, or "custom" (dragged there)
     overlay_x: int = 0  # custom position: the pill's centre, in screen pixels
     overlay_y: int = 0
+    overlay_fx: bool = True  # the hand animations: tapping what it clicks, waving, confetti when done
+
+    @property
+    def name(self) -> str:
+        return self.assistant_name.strip() or DEFAULT_NAME
 
     @classmethod
     def load(cls) -> Settings:
@@ -93,7 +118,12 @@ def get_api_key(name: str = "typesafe") -> str | None:
     if key := os.environ.get(f"{name.upper()}_API_KEY"):
         return key
     try:
-        return keyring.get_password(_KEYRING_SERVICE, _keyring_user(name))
+        if key := keyring.get_password(_KEYRING_SERVICE, _keyring_user(name)):
+            return key
+        if key := keyring.get_password(OLD_APP_NAME, _keyring_user(name)):  # saved before the rebrand: move it
+            keyring.set_password(_KEYRING_SERVICE, _keyring_user(name), key)
+            _delete(OLD_APP_NAME, name)
+        return key
     except keyring.errors.KeyringError:
         log.exception("Could not read %s API key from Credential Manager", name)
         return None
@@ -103,8 +133,13 @@ def set_api_key(key: str, name: str = "typesafe") -> None:
     if key:
         keyring.set_password(_KEYRING_SERVICE, _keyring_user(name), key)
         return
+    _delete(_KEYRING_SERVICE, name)
+    _delete(OLD_APP_NAME, name)
+
+
+def _delete(service: str, name: str) -> None:
     try:
-        keyring.delete_password(_KEYRING_SERVICE, _keyring_user(name))
+        keyring.delete_password(service, _keyring_user(name))
     except keyring.errors.PasswordDeleteError:
         pass
 
