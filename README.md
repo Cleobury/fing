@@ -133,7 +133,7 @@ In PowerShell, from the project folder:
 ```
 
 This creates `.venv`, installs `requirements.txt` and adds a **Fing** shortcut to the Start menu and the
-project folder (replacing any old **Jev Harness** ones). If PowerShell refuses to run the script, allow local
+project folder. If PowerShell refuses to run the script, allow local
 scripts for your account first: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
 Then:
@@ -146,10 +146,6 @@ Then:
 4. Press **Save**.
 
 It runs without a console window. To see its log while debugging, run `.venv\Scripts\python -m fing`.
-
-**Upgrading from Jev Harness:** settings, API keys and logs carry over (the first start moves them from
-`%APPDATA%\JevHarness` to `%APPDATA%\Fing`), old shortcuts keep working until you re-run `setup.ps1`,
-and a wake phrase you saved, like "hey jev", keeps working until you change it.
 
 ## Using it
 
@@ -325,7 +321,6 @@ you used it) and `%APPDATA%\Fing`. The API keys are under **Fing** in Credential
 | `scripts.py`, `journal.py` | Saved scripts and their reports; the run journal for the AI's context |
 | `settings.py` | Settings file and API keys |
 
-The code is in the `fing` package; `jevharness` is a stub so shortcuts made before the rename still start it.
 Whisper must load before anything initialises COM (Windows OCR, PortAudio, the tray icon), or CTranslate2
 crashes; that's why `.audio` and `.perception` are imported late in `app.py`.
 
