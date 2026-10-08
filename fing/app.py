@@ -446,11 +446,27 @@ class App:
         self._refresh_idle()
 
     def open_settings(self) -> None:
-        if self.settings_dialog and self.settings_dialog.win.winfo_exists():
-            self.settings_dialog.win.lift()
-            self.settings_dialog.win.focus_force()
-        else:
+        dialog = self.settings_dialog
+        if dialog and dialog.win.winfo_exists() and dialog.win.state() != "withdrawn":
+            dialog.win.deiconify()  # in case it was minimised
+            dialog.win.lift()
+            dialog.win.focus_force()
+            return
+        if dialog:  # a window left half-built or hidden by an earlier failure: start again
+            self.settings_dialog = None
+            try:
+                dialog.win.destroy()
+            except tk.TclError:
+                pass
+        before = set(self.root.winfo_children())
+        try:
             self.settings_dialog = SettingsDialog(self)
+        except Exception as e:
+            log.exception("Couldn't open Settings")
+            for w in set(self.root.winfo_children()) - before:  # the window it got as far as making
+                w.destroy()
+            self.settings_dialog = None
+            self.status("error", f"Couldn't open Settings: {str(e)[:60]}", 5000)
 
     def toggle_autostart(self) -> None:
         on = not autostart.is_enabled()
