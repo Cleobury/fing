@@ -483,6 +483,7 @@ class Highlight:
         y1 = max(r[3] for r in rects) + p
         w, h = x1 - x0, y1 - y0
         self.win.geometry(f"{w}x{h}+{x0}+{y0}")
+        self.win.update_idletasks()  # move it before showing it (see Fx._play)
         self.rect = (x0, y0, x1, y1)
         c = self.canvas
         c.configure(width=w, height=h)

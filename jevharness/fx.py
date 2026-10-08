@@ -233,6 +233,9 @@ class Fx:
         self.idle.clear()
         self.canvas.configure(width=x1 - x0, height=y1 - y0)
         self.win.geometry(f"{x1 - x0}x{y1 - y0}+{x0}+{y0}")  # "+-1920" when negative, never "-1920" (see overlay)
+        # Apply the move now: showing the window first (it was hidden with ShowWindow, behind Tk's back) puts it
+        # back where it was, and Tk then keeps that spot and only changes the size.
+        self.win.update_idletasks()
         self.rect = (x0, y0, x1, y1)
         _user32.ShowWindow(self.hwnd, _SW_SHOWNOACTIVATE)
         _user32.SetWindowPos(self.hwnd, _HWND_TOPMOST, 0, 0, 0, 0, _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE)
