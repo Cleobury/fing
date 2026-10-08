@@ -6,6 +6,8 @@
 phone, and Fing reads the screen, moves the mouse, clicks, types and presses keys the way you would. It works
 with whatever is on your screen, in any app, without needing the app to support it.
 
+<p align="center"><img src="docs/example.gif" alt="Fing at work: it hears a spoken request, then reads the screen and clicks and types to carry it out"></p>
+
 Fing is short for *fingers*: it extends what you can do with a computer by being the hands on the mouse and
 keyboard. That makes it useful to anyone with their hands full, and especially to people for whom a mouse and
 keyboard are slow, tiring, painful or impossible to use.
