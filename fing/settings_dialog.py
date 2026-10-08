@@ -1155,6 +1155,12 @@ class SettingsDialog:
     def test(self) -> None:
         key, model = self.key.get().strip(), self.model.get().strip() or "jev-latest"
         planner = self._planner()
+        # Read every field here: Tk must only be touched from its own thread, never from run() below.
+        vision = None
+        if planner is not None and self.llm_screenshot.get():
+            vision = planner if not self._vision_choice() else Planner(
+                planner.provider, self._vision_choice(), self.llm_key.get().strip() or None,
+                self.llm_url.get().strip() or None, True, timeout_s=120, keep_alive=self.llm_keep_alive.get())
         self.status.set("Testing…")
         self.test_btn.state(["disabled"])
 
@@ -1170,10 +1176,7 @@ class SettingsDialog:
                         self._served_by_test = True
                     planner.ping()
                     lines.append(f"AI planner: {planner.model} replied" + (f" ({served})." if served else "."))
-                    if self.llm_screenshot.get():
-                        vision = planner if not self._vision_choice() else Planner(
-                            planner.provider, self._vision_choice(), self.llm_key.get().strip() or None,
-                            self.llm_url.get().strip() or None, True, timeout_s=120, keep_alive=self.llm_keep_alive.get())
+                    if vision is not None:
                         self.app.ui(self.status.set, f"Checking whether {vision.model} can point at things…")
                         hits, tries = vision.pointing_check()
                         verdict = "good" if hits == tries else "unreliable: pick another vision model" if hits < tries - 1 else "mostly OK"
@@ -1260,14 +1263,19 @@ class SettingsDialog:
     def close(self) -> None:
         """Cancel: drop unsaved changes, including any indicator preview or unfinished drag, and any local model
         a Test loaded (going back to the saved one)."""
-        self.app.overlay.finish_move(keep=False)
-        self.app.apply_overlay_style()
-        if self._served_by_test:
-            saved = self.app.planner
-            self.app.serve_model_in_background(saved, load=bool(saved and saved.keep_alive))
-        self._destroy()
+        try:
+            self.app.overlay.finish_move(keep=False)
+            self.app.apply_overlay_style()
+            if self._served_by_test:
+                saved = self.app.planner
+                self.app.serve_model_in_background(saved, load=bool(saved and saved.keep_alive))
+        finally:  # always close, so a failure here can't leave a window that won't go away or reopen
+            self._destroy()
 
     def _destroy(self) -> None:
-        self._stop_wake_test()
-        self.win.destroy()
+        try:
+            self._stop_wake_test()
+        except Exception:
+            log.exception("Couldn't stop the wake word test")
         self.app.settings_dialog = None
+        self.win.destroy()
