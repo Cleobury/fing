@@ -25,6 +25,7 @@ from .scripts import Script, breakdown_key, load_scripts, save_scripts, split_li
 from .settings import get_api_key, set_api_key
 
 log = logging.getLogger(__name__)
+_CHECK_IMAGES: dict[str, dict] = {}  # the tick box images of each checkbox element made (see _style)
 
 _PROVIDER_LABELS = {"off": "Off", "openrouter": "OpenRouter", "ollama": "Ollama (local)"}
 _SAME_AS_PLANNER = "Same as the planner"
@@ -244,13 +245,17 @@ class SettingsDialog:
                    background=[("readonly", c["field"]), ("active", c["field"])])
         st.configure("TCombobox", background=c["field"])
         st.configure("TSpinbox", background=c["field"])
-        self._check_images = {k: self._photo(self._check_box(k)) for k in ("off", "on", "off_dis", "on_dis", "hover")}
-        i = self._check_images
-        st.element_create("Fing.Checkbutton.indicator", "image", i["off"],
-                          ("selected", "disabled", i["on_dis"]), ("disabled", i["off_dis"]),
-                          ("selected", i["on"]), ("active", i["hover"]), sticky="w", width=self.px(27))
+        # ttk elements can't be removed or redefined, so each look (light/dark, scaling) gets its own, made the first
+        # time Settings opens with it; its images belong to the app, so they outlive this window.
+        indicator = f"Fing{self.mode}{round(self.scale * 100)}.Checkbutton.indicator"
+        if indicator not in st.element_names():
+            i = _CHECK_IMAGES[indicator] = {k: self._photo(self._check_box(k), self.app.root)
+                                            for k in ("off", "on", "off_dis", "on_dis", "hover")}
+            st.element_create(indicator, "image", i["off"],
+                              ("selected", "disabled", i["on_dis"]), ("disabled", i["off_dis"]),
+                              ("selected", i["on"]), ("active", i["hover"]), sticky="w", width=self.px(27))
         st.layout("TCheckbutton", [("Checkbutton.padding", {"sticky": "nswe", "children": [
-            ("Fing.Checkbutton.indicator", {"side": "left", "sticky": ""}),
+            (indicator, {"side": "left", "sticky": ""}),
             ("Checkbutton.label", {"side": "left", "sticky": "nswe"})]})])
         st.configure("TCheckbutton", padding=self.px(2))
         st.map("TCheckbutton", background=[("active", c["page"])])
@@ -288,10 +293,10 @@ class SettingsDialog:
                    width=max(k, m // 9), joint="curve")
         return img.resize((n, n), Image.LANCZOS)
 
-    def _photo(self, image):
+    def _photo(self, image, master=None):
         from PIL import ImageTk
 
-        return ImageTk.PhotoImage(image, master=self.win)
+        return ImageTk.PhotoImage(image, master=master or self.win)
 
     def _tab(self, _, title: str) -> ttk.Frame:
         """A page, and its entry in the sidebar."""
