@@ -11,9 +11,24 @@ import keyring
 
 from .brand import DEFAULT_NAME
 
-# The folder and Credential Manager entries keep the app's old name, so settings and keys carry over.
-APP_NAME = "JevHarness"
-DATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
+APP_NAME = "Fing"
+OLD_APP_NAME = "JevHarness"  # the app's name before the rebrand: its data folder and saved keys are moved over
+_APPDATA = os.environ.get("APPDATA", os.path.expanduser("~"))
+
+
+def _data_dir() -> str:
+    """%APPDATA%\\Fing, moving %APPDATA%\\JevHarness there the first time. If the move fails (a file is open),
+    the old folder is used as it is and the move is tried again next start."""
+    new, old = os.path.join(_APPDATA, APP_NAME), os.path.join(_APPDATA, OLD_APP_NAME)
+    if os.path.isdir(old) and not os.path.exists(new):
+        try:
+            os.rename(old, new)
+        except OSError:
+            return old
+    return new
+
+
+DATA_DIR = _data_dir()
 LOG_DIR = os.path.join(DATA_DIR, "logs")
 SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
 
@@ -103,7 +118,12 @@ def get_api_key(name: str = "typesafe") -> str | None:
     if key := os.environ.get(f"{name.upper()}_API_KEY"):
         return key
     try:
-        return keyring.get_password(_KEYRING_SERVICE, _keyring_user(name))
+        if key := keyring.get_password(_KEYRING_SERVICE, _keyring_user(name)):
+            return key
+        if key := keyring.get_password(OLD_APP_NAME, _keyring_user(name)):  # saved before the rebrand: move it
+            keyring.set_password(_KEYRING_SERVICE, _keyring_user(name), key)
+            _delete(OLD_APP_NAME, name)
+        return key
     except keyring.errors.KeyringError:
         log.exception("Could not read %s API key from Credential Manager", name)
         return None
@@ -113,8 +133,13 @@ def set_api_key(key: str, name: str = "typesafe") -> None:
     if key:
         keyring.set_password(_KEYRING_SERVICE, _keyring_user(name), key)
         return
+    _delete(_KEYRING_SERVICE, name)
+    _delete(OLD_APP_NAME, name)
+
+
+def _delete(service: str, name: str) -> None:
     try:
-        keyring.delete_password(_KEYRING_SERVICE, _keyring_user(name))
+        keyring.delete_password(service, _keyring_user(name))
     except keyring.errors.PasswordDeleteError:
         pass
 

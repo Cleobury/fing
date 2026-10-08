@@ -1,7 +1,7 @@
 import numpy as np
 
-from jevharness import listen
-from jevharness.listen import FRAME, RATE, Listener, SpeechGate, Utterance
+from fing import listen
+from fing.listen import FRAME, RATE, Listener, SpeechGate, Utterance
 
 
 def quiet(seconds):

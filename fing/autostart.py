@@ -32,7 +32,7 @@ def enable() -> None:
 
     script = (
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{lnk}'); "
-        "$s.TargetPath = '{exe}'; $s.Arguments = '-m jevharness'; $s.WorkingDirectory = '{cwd}'; "
+        "$s.TargetPath = '{exe}'; $s.Arguments = '-m fing'; $s.WorkingDirectory = '{cwd}'; "
         "$s.IconLocation = '{icon}'; $s.Description = 'Fing: your desktop assistant'; $s.Save()"
     ).format(lnk=ps(SHORTCUT), exe=ps(_pythonw()), cwd=ps(PROJECT_DIR), icon=ps(os.path.join(_PACKAGE_DIR, "icon.ico")))
     subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True,

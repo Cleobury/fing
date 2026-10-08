@@ -38,9 +38,9 @@ foreach ($dir in @($root, [Environment]::GetFolderPath('Programs'), [Environment
 foreach ($path in $targets) {
     $lnk = $shell.CreateShortcut($path)
     $lnk.TargetPath = Join-Path $venv 'Scripts\pythonw.exe'
-    $lnk.Arguments = '-m jevharness'
+    $lnk.Arguments = '-m fing'
     $lnk.WorkingDirectory = $root
-    $lnk.IconLocation = Join-Path $root 'jevharness\icon.ico'
+    $lnk.IconLocation = Join-Path $root 'fing\icon.ico'
     $lnk.Description = 'Fing: your desktop assistant'
     $lnk.Save()
     Write-Host "Shortcut: $path"

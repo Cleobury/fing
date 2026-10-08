@@ -1,6 +1,6 @@
 import numpy as np
 
-from jevharness import settle as s
+from fing import settle as s
 
 
 def grid(fill=0, h=40, w=60):

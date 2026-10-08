@@ -166,6 +166,6 @@ def svg(size: int = 64) -> str:
             f'<path d="{nail}" fill="#e9e4ff"/></svg>')
 
 
-if __name__ == "__main__":  # python -m jevharness.brand: rebuild icon.ico after changing the logo
+if __name__ == "__main__":  # python -m fing.brand: rebuild icon.ico after changing the logo
     write_icon()
     print("Wrote", ICON_PATH)

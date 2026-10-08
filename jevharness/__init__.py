@@ -1,1 +1,2 @@
-"""Fing: a desktop assistant that uses your computer for you. Voice-driven control: push-to-talk -> Whisper -> screen OCR -> the TypeSafe classifier decides -> mouse/keyboard."""
+"""The old name of the `fing` package, kept so shortcuts made before the rename (`pythonw -m jevharness`) still
+start Fing. Re-running setup.ps1 replaces them."""

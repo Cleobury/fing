@@ -1,4 +1,4 @@
-from jevharness import wakephrase as w
+from fing import wakephrase as w
 
 
 def test_whisper_misspellings_of_the_name_still_match():

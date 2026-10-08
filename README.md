@@ -145,9 +145,10 @@ Then:
    remote (Phone) and the AI planner.
 4. Press **Save**.
 
-It runs without a console window. To see its log while debugging, run `.venv\Scripts\python -m jevharness`.
+It runs without a console window. To see its log while debugging, run `.venv\Scripts\python -m fing`.
 
-**Upgrading from Jev Harness:** settings, API keys and logs carry over (they stay in `%APPDATA%\JevHarness`),
+**Upgrading from Jev Harness:** settings, API keys and logs carry over (the first start moves them from
+`%APPDATA%\JevHarness` to `%APPDATA%\Fing`), old shortcuts keep working until you re-run `setup.ps1`,
 and a wake phrase you saved, like "hey jev", keeps working until you change it.
 
 ## Using it
@@ -238,7 +239,7 @@ sure …" lines become checks and "wait …" a pause. The breakdown is saved and
 so every run follows the same steps; without an AI planner, each line is a step. Start one by saying "run the
 notepad test", from tray icon → **Run script**, or with **Run now**. **Run unattended** (on by default) decides
 everything like YOLO mode; **Stop at the first failed step or check** is on by default too. A report of every
-step and check is saved to `%APPDATA%\JevHarness\logs\scripts`.
+step and check is saved to `%APPDATA%\Fing\logs\scripts`.
 
 ## Settings
 
@@ -266,7 +267,7 @@ mode.
 - **Sent to the AI planner, only when it's used:** the same text with positions, plus a screenshot if allowed.
   With OpenRouter this goes to OpenRouter and the model's provider; with Ollama it stays on your PC.
 - API keys are kept in Windows Credential Manager, never in files. Settings and logs are in
-  `%APPDATA%\JevHarness`.
+  `%APPDATA%\Fing`.
 
 ## Safety and limitations
 
@@ -284,7 +285,7 @@ mode.
 
 ## Troubleshooting
 
-Logs, including every decision and its probabilities, are in `%APPDATA%\JevHarness\logs` (tray icon → **Open
+Logs, including every decision and its probabilities, are in `%APPDATA%\Fing\logs` (tray icon → **Open
 logs folder**): `app.log` for the app, `commands-<date>.jsonl` for each command.
 
 | Problem | Try |
@@ -302,7 +303,7 @@ logs folder**): `app.log` for the app, `commands-<date>.jsonl` for each command.
 ## Uninstalling
 
 Quit it from the tray icon, then delete the project folder, the **Fing** shortcuts (Start menu, and Startup if
-you used it) and `%APPDATA%\JevHarness`. The API keys are under **JevHarness** in Credential Manager.
+you used it) and `%APPDATA%\Fing`. The API keys are under **Fing** in Credential Manager.
 
 ## How it fits together
 
@@ -317,14 +318,14 @@ you used it) and `%APPDATA%\JevHarness`. The API keys are under **JevHarness** i
 | `stt.py`, `audio.py` | Whisper on CUDA; microphone capture |
 | `listen.py`, `wakephrase.py` | Hands-free: speech detection, spotting and rating the wake phrase, recording an answer |
 | `remote.py`, `web/index.html` | Phone remote: HTTPS server on the local network and the hold-to-talk page |
-| `brand.py` | The name, colours and logo (the hand's outlines are shared by the icon and the animations); `python -m jevharness.brand` rebuilds `icon.ico` |
+| `brand.py` | The name, colours and logo (the hand's outlines are shared by the icon and the animations); `python -m fing.brand` rebuilds `icon.ico` |
 | `overlay.py`, `fx.py` | The indicator (dot, pill, ✓, sparks, shake) and the highlight; the hand animations over the screen |
 | `tray.py`, `settings_dialog.py` | The tray icon and Settings window |
 | `apps.py`, `search.py`, `autostart.py` | Start-menu apps, PC search, Start with Windows |
 | `scripts.py`, `journal.py` | Saved scripts and their reports; the run journal for the AI's context |
 | `settings.py` | Settings file and API keys |
 
-The Python package keeps its original name, `jevharness`, so existing shortcuts and settings keep working.
+The code is in the `fing` package; `jevharness` is a stub so shortcuts made before the rename still start it.
 Whisper must load before anything initialises COM (Windows OCR, PortAudio, the tray icon), or CTranslate2
 crashes; that's why `.audio` and `.perception` are imported late in `app.py`.
 
