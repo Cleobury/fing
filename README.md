@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/logo.svg" width="112" alt="Fing logo: a gloved hand pointing up"></p>
+<p align="center"><img src="docs/logo.png" width="112" alt="Fing logo: a gloved hand pointing up"></p>
 
 # Fing
 
