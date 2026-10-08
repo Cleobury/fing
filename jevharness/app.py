@@ -292,8 +292,9 @@ class App:
             self.tray.set_state({"listening": "listening", "thinking": "thinking", "error": "error"}.get(state, "idle"))
 
     def _wave(self) -> None:
-        """Tk thread: the hand waves out of the indicator's dot."""
-        self.fx.wave(*self.overlay.dot_screen())
+        """Tk thread: a big hand waves hello in the middle of the screen."""
+        x, y = self.fx.centre()
+        self.fx.wave(x, y + round(70 * self.fx.scale), size=3)
 
     def _celebrate(self) -> None:
         """Any thread: confetti from the indicator's dot (a request is done)."""

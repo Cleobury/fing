@@ -1,7 +1,8 @@
 """The Settings window opened from the tray menu.
 
-A sidebar of pages (General, TypeSafe, AI planner, …) under the logo, in the Windows 11 look (the Sun Valley
-ttk theme, light or dark to match Windows), with Save and Cancel at the bottom.
+A sidebar of pages (General, TypeSafe, AI planner, …) under the logo, light or dark to match Windows, with
+Save and Cancel at the bottom. The look is drawn by ttk's "clam" theme with our colours rather than from
+images, so everything (text, boxes, padding) grows with Windows' display scaling.
 """
 
 import ctypes
@@ -57,13 +58,15 @@ _PAGE_ICONS = {
     "Phone": "\ue8ea", "PC search": "\ue721", "Scripts": "\ue8fd", "Indicator": "\ue790",
 }
 _ICON_FONTS = ("Segoe Fluent Icons", "Segoe MDL2 Assets")
-# Sidebar and text colours that go with the Sun Valley theme's light and dark backgrounds.
 _PALETTE = {
     "light": {"side": "#f0f0f3", "hover": "#e4e4ea", "selected": "#e0dcff", "text": "#1b1b1f", "muted": "#5f6370",
-              "page": "#fafafa", "field": "#ffffff", "link": "#5b3fe0"},
+              "page": "#fafafa", "field": "#ffffff", "link": "#5b3fe0", "border": "#cfcfd8", "button": "#ffffff",
+              "pressed": "#e6e6ec", "accent": "#6a4cf0", "accent_hover": "#5a3ce0", "on_accent": "#ffffff"},
     "dark": {"side": "#202024", "hover": "#2c2c33", "selected": "#352d5c", "text": "#f2f2f5", "muted": "#a2a5b4",
-             "page": "#1c1c1c", "field": "#2b2b2b", "link": "#a99bff"},
+             "page": "#1b1b1f", "field": "#2a2a30", "link": "#a99bff", "border": "#43434d", "button": "#2d2d34",
+             "pressed": "#24242a", "accent": "#7c5cff", "accent_hover": "#8f73ff", "on_accent": "#ffffff"},
 }
+_FONT = ("Segoe UI", 10)  # in points, so it follows Windows' display scaling
 
 
 def _windows_dark() -> bool:
@@ -117,13 +120,16 @@ class SettingsDialog:
         win.protocol("WM_DELETE_WINDOW", self.close)
         self.mode = "dark" if _windows_dark() else "light"
         self.colours = _PALETTE[self.mode]
+        # Windows' display scaling (1.0 at 100%, 1.5 at 150%…): Tk sizes fonts in points by it, but pixel sizes
+        # (padding, wrapping, the sidebar) have to be scaled by hand; see px() and _scale_layout().
+        self.scale = max(1.0, win.winfo_fpixels("1i") / 96)
         self._style()
         c = self.colours
 
-        side = tk.Frame(win, bg=c["side"], width=210)
+        side = tk.Frame(win, bg=c["side"], width=self.px(210))
         side.grid(row=0, column=0, rowspan=2, sticky="ns")
         side.grid_propagate(False)
-        self._logo = self._photo(brand.logo(44))
+        self._logo = self._photo(brand.logo(self.px(44)))
         head = tk.Frame(side, bg=c["side"])
         head.pack(fill="x", padx=18, pady=(22, 18))
         tk.Label(head, image=self._logo, bg=c["side"]).pack(side="left")
@@ -174,6 +180,7 @@ class SettingsDialog:
         self._provider_changed(initial=True)
         self._powertoys_changed(initial=True)
         self.show_page("General" if get_api_key() else "TypeSafe")
+        self._scale_layout(win)
         win.update_idletasks()
         x = (win.winfo_screenwidth() - win.winfo_reqwidth()) // 2
         y = (win.winfo_screenheight() - win.winfo_reqheight()) // 3
@@ -185,20 +192,76 @@ class SettingsDialog:
 
     # ---- look and layout ------------------------------------------------------------
 
-    def _style(self) -> None:
-        """The Windows 11 (Sun Valley) theme when it's installed, plus the few styles of our own."""
-        c = self.colours
-        try:
-            import sv_ttk
+    def px(self, n: float) -> int:
+        """`n` pixels at 100% scaling, in pixels at the display's scaling."""
+        return round(n * self.scale)
 
-            sv_ttk.set_theme(self.mode, self.app.root)
-        except Exception:  # not installed (older setup): the standard Windows look
-            log.info("sv-ttk unavailable; using the default ttk theme")
-            self.colours = c = {**c, **{"page": ttk.Style(self.win).lookup("TFrame", "background") or c["page"]}}
+    def _scale_layout(self, widget: tk.Misc) -> None:
+        """Scale every pixel measure set while building (padding, gaps, text wrapping) by the display scaling."""
+        if self.scale < 1.05:
+            return
+
+        def scaled(v):
+            items = v if isinstance(v, (tuple, list)) else str(v).split()
+            parts = [round(float(str(p)) * self.scale) for p in items]
+            return tuple(parts) if len(parts) > 1 else (parts[0] if parts else 0)
+
+        for w in widget.winfo_children():
+            manager = w.winfo_manager()
+            if manager in ("grid", "pack"):
+                info = w.grid_info() if manager == "grid" else w.pack_info()
+                pads = {k: scaled(info[k]) for k in ("padx", "pady", "ipadx", "ipady") if k in info}
+                (w.grid_configure if manager == "grid" else w.pack_configure)(**pads)
+            if isinstance(w, ttk.Frame) and str(w.cget("padding")):
+                w.configure(padding=scaled(w.cget("padding")))
+            if isinstance(w, (ttk.Label, tk.Label)) and int(str(w.cget("wraplength")) or 0) > 0:
+                w.configure(wraplength=self.px(int(str(w.cget("wraplength")))))
+            self._scale_layout(w)
+
+    def _style(self) -> None:
+        """A flat, modern look in the window's colours, drawn rather than from images so it scales."""
+        c = self.colours
         st = ttk.Style(self.win)
-        if "sun-valley" in st.theme_use():  # its pages are the window's own background colour
-            for name in (".", "TFrame", "TLabel", "TCheckbutton", "TRadiobutton"):
-                st.configure(name, background=c["page"], foreground=c["text"])
+        st.theme_use("clam")
+        flat = {"bordercolor": c["border"], "lightcolor": c["field"], "darkcolor": c["field"]}
+        st.configure(".", background=c["page"], foreground=c["text"], fieldbackground=c["field"], font=_FONT,
+                     troughcolor=c["hover"], selectbackground=c["accent"], selectforeground=c["on_accent"],
+                     insertcolor=c["text"], focuscolor=c["accent"], arrowcolor=c["text"], **flat)
+        st.map(".", foreground=[("disabled", c["muted"])])
+        st.configure("TButton", background=c["button"], padding=(self.px(14), self.px(5)), relief="flat",
+                     bordercolor=c["border"], lightcolor=c["button"], darkcolor=c["button"])
+        st.map("TButton", background=[("disabled", c["page"]), ("pressed", c["pressed"]), ("active", c["hover"])],
+               lightcolor=[("pressed", c["pressed"]), ("active", c["hover"])],
+               darkcolor=[("pressed", c["pressed"]), ("active", c["hover"])])
+        st.configure("Accent.TButton", background=c["accent"], foreground=c["on_accent"], bordercolor=c["accent"],
+                     lightcolor=c["accent"], darkcolor=c["accent"])
+        st.map("Accent.TButton", background=[("pressed", c["accent"]), ("active", c["accent_hover"])],
+               lightcolor=[("active", c["accent_hover"])], darkcolor=[("active", c["accent_hover"])])
+        for name in ("TEntry", "TCombobox", "TSpinbox"):
+            st.configure(name, padding=(self.px(8), self.px(5)), arrowsize=self.px(13), **flat)
+            st.map(name, bordercolor=[("focus", c["accent"])], lightcolor=[("focus", c["field"])],
+                   fieldbackground=[("readonly", c["field"]), ("disabled", c["page"])],
+                   background=[("readonly", c["field"]), ("active", c["field"])])
+        st.configure("TCombobox", background=c["field"])
+        st.configure("TSpinbox", background=c["field"])
+        self._check_images = {k: self._photo(self._check_box(k)) for k in ("off", "on", "off_dis", "on_dis", "hover")}
+        i = self._check_images
+        st.element_create("Fing.Checkbutton.indicator", "image", i["off"],
+                          ("selected", "disabled", i["on_dis"]), ("disabled", i["off_dis"]),
+                          ("selected", i["on"]), ("active", i["hover"]), sticky="w", width=self.px(27))
+        st.layout("TCheckbutton", [("Checkbutton.padding", {"sticky": "nswe", "children": [
+            ("Fing.Checkbutton.indicator", {"side": "left", "sticky": ""}),
+            ("Checkbutton.label", {"side": "left", "sticky": "nswe"})]})])
+        st.configure("TCheckbutton", padding=self.px(2))
+        st.map("TCheckbutton", background=[("active", c["page"])])
+        st.configure("Horizontal.TScale", gripcount=0, background=c["accent"], troughcolor=c["hover"], bordercolor=c["page"],
+                     lightcolor=c["accent"], darkcolor=c["accent"], sliderlength=self.px(16))
+        st.map("Horizontal.TScale", background=[("active", c["accent_hover"])])
+        st.configure("TSeparator", background=c["border"])
+        # The drop-down lists of comboboxes are classic Tk listboxes.
+        for key, value in (("background", c["field"]), ("foreground", c["text"]), ("font", _FONT),
+                           ("selectBackground", c["accent"]), ("selectForeground", c["on_accent"])):
+            self.win.option_add(f"*TCombobox*Listbox.{key}", value)
         self.win.configure(bg=c["page"])
         st.configure("Muted.TLabel", foreground=c["muted"])
         st.configure("Link.TLabel", foreground=c["link"])
@@ -206,6 +269,24 @@ class SettingsDialog:
         st.configure("Heading.TLabel", font=("Segoe UI Semibold", 11))
         st.configure("Good.TLabel", foreground="#2f9e55")
         st.configure("Weak.TLabel", foreground="#d9822b")
+
+    def _check_box(self, kind: str):
+        """A rounded checkbox (ticked for "on"), drawn at the display's scaling."""
+        from PIL import Image, ImageDraw
+
+        c, n, k = self.colours, self.px(18), 4  # drawn 4x and shrunk, for smooth edges
+        img = Image.new("RGBA", (n * k, n * k), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        on, disabled = kind.startswith("on"), kind.endswith("dis")
+        fill = (c["border"] if disabled else c["accent"]) if on else (c["page"] if disabled else c["field"])
+        edge = fill if on else (c["accent"] if kind == "hover" else c["border"])
+        d.rounded_rectangle((k, k, n * k - k - 1, n * k - k - 1), radius=n * k // 4, fill=fill, outline=edge,
+                            width=max(k, n * k // 12))
+        if on:
+            m = n * k
+            d.line([(m * 0.27, m * 0.52), (m * 0.43, m * 0.68), (m * 0.74, m * 0.34)], fill=c["on_accent"],
+                   width=max(k, m // 9), joint="curve")
+        return img.resize((n, n), Image.LANCZOS)
 
     def _photo(self, image):
         from PIL import ImageTk
@@ -220,7 +301,7 @@ class SettingsDialog:
         c = self.colours
         item = tk.Frame(self.nav, bg=c["side"], cursor="hand2")
         item.pack(fill="x", pady=1)
-        bar = tk.Frame(item, bg=c["side"], width=3, height=18)
+        bar = tk.Frame(item, bg=c["side"], width=self.px(3), height=self.px(18))
         bar.pack(side="left", padx=(2, 0))
         parts = [item, bar]
         if self._icon_font:
@@ -657,7 +738,7 @@ class SettingsDialog:
         port = ttk.Spinbox(f, from_=1024, to=65535, textvariable=self.remote_port, width=7, command=self._remote_changed)
         port.grid(row=4, column=1, sticky="w", pady=(8, 0))
         port.bind("<KeyRelease>", lambda _: self._remote_changed())
-        self.qr = tk.Canvas(f, width=180, height=180, highlightthickness=0, background="white")
+        self.qr = tk.Canvas(f, width=self.px(180), height=self.px(180), highlightthickness=0, background="white")
         self.qr.grid(row=5, column=0, rowspan=2, sticky="nw", pady=(14, 0))
         ttk.Label(f, wraplength=290, style="Muted.TLabel", justify="left", text=(
             "Scan the code with your phone's camera (it includes the PIN), then Save here. "
@@ -693,7 +774,7 @@ class SettingsDialog:
         code = qrcode.QRCode(border=2, error_correction=qrcode.constants.ERROR_CORRECT_M)
         code.add_data(link)
         matrix = code.get_matrix()
-        cell = 180 / len(matrix)
+        cell = self.px(180) / len(matrix)
         for y, row in enumerate(matrix):
             for x, dark in enumerate(row):
                 if dark:
@@ -977,20 +1058,22 @@ class SettingsDialog:
         self._opacity_moved(preview=False)
 
     def _demo_fx(self, name: str) -> None:
-        """Play one of the indicator's animations, even with them switched off (to see what they look like)."""
+        """Play one of the animations, even with them switched off (to see what they look like)."""
         overlay, fx = self.app.overlay, self.app.fx
         self.app.apply_overlay_style(self._style_settings())
         if name == "shake":
-            overlay.show("error", "Something went wrong", 2500)
+            overlay.show("error", "Shake test: this is how a problem looks", 2500)
             overlay.shake()
             return
         overlay.show("done" if name == "celebrate" else overlay.idle_state, self._sample_idle(), 2500)
-        x, y = overlay.dot_screen()
+        x, y = fx.centre()  # big, in the middle of the screen, so it's easy to see
         fx.enabled = True
-        if name == "tap":  # the middle of this window's title, as if Fing were clicking it
-            fx.tap(self.win.winfo_rootx() + self.win.winfo_width() // 2, self.win.winfo_rooty() + 40, "#34a853")
+        if name == "tap":
+            fx.tap(x, y, "#34a853", size=2.5)
+        elif name == "wave":
+            fx.wave(x, y + round(70 * fx.scale), size=3)
         else:
-            getattr(fx, name)(x, y)
+            fx.celebrate(x, y + round(60 * fx.scale), size=2.5)
         fx.enabled = self.overlay_fx.get()
 
     def _sample_idle(self) -> str:

@@ -27,7 +27,6 @@ keyboard==0.13.5
 pystray==0.19.5
 pillow==12.3.0
 keyring==25.7.0
-sv-ttk==2.6.1  # the Windows 11 look for Settings
 
 # Phone remote: its HTTPS certificate, and the QR code in Settings
 cryptography==50.0.2

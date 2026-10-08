@@ -138,8 +138,8 @@ scripts for your account first: `Set-ExecutionPolicy -Scope CurrentUser RemoteSi
 
 Then:
 
-1. Start **Fing** from the Start menu. The first start downloads the Whisper model (~1.6 GB). The hand waves
-   from the indicator when it's ready.
+1. Start **Fing** from the Start menu. The first start downloads the Whisper model (~1.6 GB). A hand waves
+   hello in the middle of the screen when it's ready.
 2. Right-click the tray icon (the hand) → **Settings** → **TypeSafe**, paste your key and press **Test key**.
 3. Optionally give it a name and turn on **Start with Windows** (General), the wake word (Hands-free), the phone
    remote (Phone) and the AI planner.
@@ -171,9 +171,9 @@ works, and into a box when it asks you something. While it works, sparks circle 
 opening and closing ripples rings out of it and back in, with a chime.
 
 The **hand** shows what Fing is doing on your behalf: it taps each spot Fing clicks, with a ripple; points
-at each numbered option when it asks which one; waves from the dot when it's ready; and
+at each numbered option when it asks which one; waves hello in the middle of the screen when it's ready; and
 throws confetti when a request is done. When something goes wrong the pill shakes. Settings → Indicator turns
-the hand off and has buttons to try each animation.
+the hand off and has buttons to try each animation, big in the middle of the screen.
 
 The indicator stays on top of other windows, but hides while idle when a fullscreen app or video is in front.
 To move it, choose tray icon → **Move indicator**, drag it anywhere and double-click to drop it there.
@@ -296,7 +296,6 @@ logs folder**): `app.log` for the app, `commands-<date>.jsonl` for each command.
 | The wake word doesn't respond | Press **Test** and say it; move **Sensitivity** towards "Catches more", or pick a phrase Whisper spells more reliably |
 | The phone page can't reach the PC | Both must be on the same network. Allow Python on private networks in Windows Defender Firewall, and check the address in Settings → Phone. |
 | PC search types into the wrong place | Settings → PC search → **Detect** or **Record** |
-| Settings looks plain, not like Windows 11 | Run `setup.ps1` again to install the new `sv-ttk` dependency |
 
 ## Uninstalling
 
