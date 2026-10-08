@@ -249,7 +249,7 @@ mode.
 |---|---|
 | **General** | The assistant's name (and so its wake phrase), microphone, **Start with Windows**, dry run, YOLO mode (and whether it still refuses irreversible actions), and whether to read button names and all your screens |
 | **TypeSafe** | The TypeSafe API key and classifier model, with **Test key**, and the confidence it needs before acting on its own |
-| **AI planner** | Provider (off, OpenRouter, Ollama), model (**Load list**; `openrouter/auto` lets OpenRouter pick), key or server URL, when to use it (only when the classifier is unsure, or for every command), screenshots, keeping an Ollama model loaded, and the **vision model**, which must point accurately (**Test connections** checks it) |
+| **AI planner** | Provider (off, OpenRouter, Ollama), model (**Load list**; a fast model such as `google/gemini-3.8-flash` keeps replies quick, while `openrouter/auto` lets OpenRouter pick and may choose a slower one that deliberates), key or server URL, when to use it (only when the classifier is unsure, or for every command), screenshots, keeping an Ollama model loaded, and the **vision model**, which must point accurately (**Test connections** checks it) |
 | **Hands-free** | The wake word: on or off, the phrase, **Test** and sensitivity; listening for answers automatically; chimes |
 | **Phone** | The phone remote: on or off, its address, QR code and PIN, and port (default 8765) |
 | **PC search** | Search with PowerToys instead of the Start menu, and its shortcut (**Record** or **Detect**) |
@@ -296,6 +296,7 @@ logs folder**): `app.log` for the app, `commands-<date>.jsonl` for each command.
 | The wake word goes off by itself | Use two words including a name, or move **Sensitivity** towards "Fewer false triggers". **Test** shows what it's hearing. |
 | The wake word doesn't respond | Press **Test** and say it; move **Sensitivity** towards "Catches more", or pick a phrase Whisper spells more reliably |
 | The phone page can't reach the PC | Both must be on the same network. Allow Python on private networks in Windows Defender Firewall, and check the address in Settings → Phone. |
+| The AI planner is slow ("Thinking it through" for half a minute) | Pick a fast model in Settings → AI planner, e.g. `google/gemini-3.8-flash`, rather than `openrouter/auto`. `app.log` records how long each AI call took. |
 | PC search types into the wrong place | Settings → PC search → **Detect** or **Record** |
 
 ## Uninstalling
