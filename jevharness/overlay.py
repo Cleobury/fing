@@ -163,7 +163,9 @@ class Overlay:
             self.root.after_cancel(self._shake_job)
             self._shake_job = None
         x, y = self._place(w, dot_y, ax, ay, align)
-        self.win.geometry(f"{w}x{h}{x:+d}{y:+d}")
+        # Always "+x+y", even when negative (a monitor left of or above the main one): Tk reads "-x" as the
+        # distance from the right edge of the screen.
+        self.win.geometry(f"{w}x{h}+{x}+{y}")
         self.rect = (x, y, x + w, y + h)
         self._set_clickable(check or bool(self._moving))
         if hold_ms:
@@ -300,7 +302,7 @@ class Overlay:
             return
         w, h = self.rect[2] - self.rect[0], self.rect[3] - self.rect[1]
         x, y = self._place(w, h // 2, ax, ay, align)
-        self.win.geometry(f"{w}x{h}{x:+d}{y:+d}")
+        self.win.geometry(f"{w}x{h}+{x}+{y}")
         self.rect = (x, y, x + w, y + h)
 
     def finish_move(self, keep: bool = True) -> None:
@@ -480,7 +482,7 @@ class Highlight:
         x1 = max(r[2] for r in rects) + p
         y1 = max(r[3] for r in rects) + p
         w, h = x1 - x0, y1 - y0
-        self.win.geometry(f"{w}x{h}{x0:+d}{y0:+d}")
+        self.win.geometry(f"{w}x{h}+{x0}+{y0}")
         self.rect = (x0, y0, x1, y1)
         c = self.canvas
         c.configure(width=w, height=h)

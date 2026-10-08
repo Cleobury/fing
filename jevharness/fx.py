@@ -18,6 +18,7 @@ import threading
 import tkinter as tk
 
 from . import brand
+from .desktop import monitor_scale
 from .overlay import _HWND_TOPMOST, _KEY, _SW_HIDE, _SW_SHOWNOACTIVATE, _SWP_NOACTIVATE, _SWP_NOMOVE, \
     _SWP_NOSIZE, _base_window, _make_passive, _mix, _user32, _work_area
 
@@ -50,7 +51,7 @@ class Fx:
         _user32.ShowWindow(self.hwnd, _SW_HIDE)
         self.rect = (0, 0, 0, 0)  # where it's showing (empty while hidden)
         self.bg = "#202124"  # the indicator's colour, for anything drawn over it
-        self.scale = max(1.0, root.winfo_fpixels("1i") / 96)  # Windows' display scaling: 2.0 at 200%
+        self.scale = 1.0  # the display scaling where the animation is playing; set by each one (see _zoom)
         self._job = None
         self._origin = (0, 0)
         self._cut = threading.Event()
@@ -62,7 +63,7 @@ class Fx:
     def tap(self, x: int, y: int, colour: str = "#34a853", size: float = 1.0) -> None:
         """The finger presses (x, y) and lifts away, leaving a ripple and sparks. `size` enlarges it (1 = the
         size used on the element it clicks)."""
-        z = self.scale * size
+        z = self._zoom(x, y, size)
         hand, angle = 58 * z, -24
         sparks = [i * math.tau / 8 + random.uniform(-0.15, 0.15) for i in range(8)]
 
@@ -97,7 +98,7 @@ class Fx:
     def wave(self, x: int, y: int, size: float = 1.0) -> None:
         """An open hand rises out of (x, y), waves twice and sinks back. `size` enlarges it (1 = coming out of
         the indicator's dot)."""
-        z = self.scale * size
+        z = self._zoom(x, y, size)
         hand = 46 * z
 
         def frame(c: tk.Canvas, f: int) -> bool:
@@ -123,7 +124,7 @@ class Fx:
 
     def celebrate(self, x: int, y: int, size: float = 1.0) -> None:
         """Confetti bursts up out of (x, y) and tumbles down. `size` enlarges it."""
-        z = self.scale * size
+        z = self._zoom(x, y, size)
         bits = []
         for i in range(22 if size <= 1 else 40):
             a = -math.pi / 2 + random.uniform(-1.1, 1.1)
@@ -154,7 +155,7 @@ class Fx:
         points = points[:6]
         if not points:
             return
-        z = self.scale
+        z = self._zoom(*points[0])
         hand, angle, per = 44 * z, -30, 22  # frames at each option
 
         def frame(c: tk.Canvas, f: int) -> bool:
@@ -177,12 +178,23 @@ class Fx:
         xs, ys = [p[0] for p in points], [p[1] for p in points]
         self._play((min(xs) - 30 * z, min(ys) - 30 * z, max(xs) + 80 * z, max(ys) + 90 * z), frame)
 
+    def _zoom(self, x: int, y: int, size: float = 1.0) -> float:
+        """How big to draw at (x, y): the display scaling of the monitor it lands on, times `size`."""
+        self.scale = monitor_scale(x, y)
+        return self.scale * size
+
     def centre(self) -> tuple[int, int]:
         """The middle of the main screen (above the taskbar)."""
         left, top, right, bottom = _work_area()
         if right <= left or bottom <= top:
             return self.root.winfo_screenwidth() // 2, self.root.winfo_screenheight() // 2
         return (left + right) // 2, (top + bottom) // 2
+
+    def hello(self) -> None:
+        """A big hand waves hello in the middle of the main screen (the wrist sits below the middle, so the
+        hand itself is centred)."""
+        x, y = self.centre()
+        self.wave(x, y + round(70 * 3 * monitor_scale(x, y)), size=3)
 
     # ---- drawing -----------------------------------------------------------------------------------------------
 
@@ -220,7 +232,7 @@ class Fx:
         self._cut.clear()
         self.idle.clear()
         self.canvas.configure(width=x1 - x0, height=y1 - y0)
-        self.win.geometry(f"{x1 - x0}x{y1 - y0}{x0:+d}{y0:+d}")
+        self.win.geometry(f"{x1 - x0}x{y1 - y0}+{x0}+{y0}")  # "+-1920" when negative, never "-1920" (see overlay)
         self.rect = (x0, y0, x1, y1)
         _user32.ShowWindow(self.hwnd, _SW_SHOWNOACTIVATE)
         _user32.SetWindowPos(self.hwnd, _HWND_TOPMOST, 0, 0, 0, 0, _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE)

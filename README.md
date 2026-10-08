@@ -173,7 +173,8 @@ opening and closing ripples rings out of it and back in, with a chime.
 The **hand** shows what Fing is doing on your behalf: it taps each spot Fing clicks, with a ripple; points
 at each numbered option when it asks which one; waves hello in the middle of the screen when it's ready; and
 throws confetti when a request is done. When something goes wrong the pill shakes. Settings → Indicator turns
-the hand off and has buttons to try each animation, big in the middle of the screen.
+the hand off and has buttons to try each animation: Wave and Tap play big in the middle of the main screen,
+Confetti comes out of the dot.
 
 The indicator stays on top of other windows, but hides while idle when a fullscreen app or video is in front.
 To move it, choose tray icon → **Move indicator**, drag it anywhere and double-click to drop it there.

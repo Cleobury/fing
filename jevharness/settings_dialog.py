@@ -1066,14 +1066,13 @@ class SettingsDialog:
             overlay.shake()
             return
         overlay.show("done" if name == "celebrate" else overlay.idle_state, self._sample_idle(), 2500)
-        x, y = fx.centre()  # big, in the middle of the screen, so it's easy to see
         fx.enabled = True
-        if name == "tap":
-            fx.tap(x, y, "#34a853", size=2.5)
+        if name == "tap":  # big, in the middle of the screen, so it's easy to see
+            fx.tap(*fx.centre(), size=2.5)
         elif name == "wave":
-            fx.wave(x, y + round(70 * fx.scale), size=3)
-        else:
-            fx.celebrate(x, y + round(60 * fx.scale), size=2.5)
+            fx.hello()
+        else:  # confetti comes out of the indicator's dot, as it does when a request is done
+            fx.celebrate(*overlay.dot_screen(), size=1.5)
         fx.enabled = self.overlay_fx.get()
 
     def _sample_idle(self) -> str:

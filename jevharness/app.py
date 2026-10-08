@@ -293,8 +293,7 @@ class App:
 
     def _wave(self) -> None:
         """Tk thread: a big hand waves hello in the middle of the screen."""
-        x, y = self.fx.centre()
-        self.fx.wave(x, y + round(70 * self.fx.scale), size=3)
+        self.fx.hello()
 
     def _celebrate(self) -> None:
         """Any thread: confetti from the indicator's dot (a request is done)."""
