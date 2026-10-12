@@ -106,6 +106,10 @@ class Overlay:
         self._clickable = False
         self._hidden = False  # hidden because a fullscreen app is in front
         self._text = ""
+        self._shown = ""  # the text on the pill right now: behind _text while it's being typed in or deleted out
+        self._type_job = None
+        self._shake_typed = False  # shake once the text being typed is all in (see shake())
+        self.typing = True  # type the text in and delete it out, rather than swapping it at once
         self.rect = (0, 0, 0, 0)
         self._dim_listening = _mix(self.dots["listening"], self.bg, 0.55)
         self.on_check = None  # called (on the Tk thread) when the user clicks ✓ "it's done"
@@ -141,6 +145,7 @@ class Overlay:
             self._revert_job = None
         self.state = state
         self._text = text
+        self._shake_typed = False
         if not self._moving:
             self._last = (state, text, check)
         if self._hidden and not (state == self.idle_state and text == self.idle_text):
@@ -148,6 +153,45 @@ class Overlay:
             self._hidden = False
         text = text if len(text) <= 1000 else text[:999] + "…"
         check = check and bool(text)
+        if self._type_job:
+            self.root.after_cancel(self._type_job)
+            self._type_job = None
+        if self.typing and not self._moving and text != self._shown:
+            self._type(state, text, check, hold_ms, len(self._shown))
+            return
+        self._render(state, text, check)
+        if hold_ms:
+            self._revert_job = self.root.after(hold_ms, lambda: self.show(self.idle_state, self.idle_text))
+
+    TYPE_MS = 20  # frame time of the typing animation
+    TYPE_FRAMES, DELETE_FRAMES = 30, 15  # at most this many frames to type a text in / delete one out
+
+    def _type(self, state: str, text: str, check: bool, hold_ms: int | None, deleting_from: int) -> None:
+        """One frame of typing: first delete what's showing back to where it differs from `text` (a few letters
+        a frame for long ones, so it never drags on), then type the rest in. The ✓ appears once it's all typed,
+        and hold_ms counts from then."""
+        self._type_job = None
+        shown = self._shown
+        if text.startswith(shown):
+            shown = text[:len(shown) + max(1, math.ceil(len(text) / self.TYPE_FRAMES))]
+        else:
+            keep = 0
+            while keep < min(len(shown), len(text)) and shown[keep] == text[keep]:
+                keep += 1
+            shown = shown[:max(keep, len(shown) - max(1, math.ceil(deleting_from / self.DELETE_FRAMES)))]
+        self._render(state, shown, check and shown == text)
+        if shown != text:
+            self._type_job = self.root.after(self.TYPE_MS, lambda: self._type(state, text, check, hold_ms, deleting_from))
+            return
+        if self._shake_typed:
+            self._shake_typed = False
+            self.shake()
+        if hold_ms:
+            self._revert_job = self.root.after(hold_ms, lambda: self.show(self.idle_state, self.idle_text))
+
+    def _render(self, state: str, text: str, check: bool) -> None:
+        """Draw the pill showing `text` (empty: just the dot) and put it in place."""
+        self._shown = text
         ax, ay, align = self._anchor()
         self._align = align
         # On the right of the screen the pill is mirrored: dot on the right, text growing to its left, ✓ at the left.
@@ -172,8 +216,6 @@ class Overlay:
         self.win.geometry(f"{w}x{h}+{x}+{y}")
         self.rect = (x, y, x + w, y + h)
         self._set_clickable(check or bool(self._moving))
-        if hold_ms:
-            self._revert_job = self.root.after(hold_ms, lambda: self.show(self.idle_state, self.idle_text))
 
     CHECK_W = 30  # extra pill width for the ✓ button
     PAD_X = 32  # text inset from the dot end (the dot sits in the first 32 px)
@@ -413,6 +455,9 @@ class Overlay:
     def shake(self) -> None:
         """Shake the pill side to side, like a head saying no (something went wrong)."""
         if self._moving:
+            return
+        if self._type_job:  # the pill is still changing size: shake it once the text is in
+            self._shake_typed = True
             return
         x0, y0, x1, y1 = self.rect
         offsets = (7, -7, 6, -6, 4, -4, 2, -1, 0)

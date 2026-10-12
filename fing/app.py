@@ -410,6 +410,7 @@ class App:
         s = s or self.settings
         if hasattr(self, "fx"):
             self.fx.enabled = s.overlay_fx
+        self.overlay.typing = s.overlay_typing
         self.overlay.apply_style(s.overlay_bg, s.overlay_fg, s.overlay_opacity, s.overlay_dots)
         self.overlay.set_position(s.overlay_position, s.overlay_x, s.overlay_y, s.overlay_anchor)
 

@@ -180,6 +180,7 @@ To move it, choose tray icon → **Move indicator**, drag it anywhere and double
 By default the dot stays put and the text grows away from it, which suits a corner. For a spot in the middle
 of the screen, set Settings → Indicator → **Text grows** to *Both ways, staying centred*: the pill then
 stays centred where you put it, the dot moving left as the text fills it.
+Each message types itself in and deletes itself out; switch that off with **Type the text in and delete it out**.
 
 ### Hands-free
 
@@ -256,7 +257,7 @@ mode.
 | **Phone** | The phone remote: on or off, its address, QR code and PIN, and port (default 8765) |
 | **PC search** | Search with PowerToys instead of the Start menu, and its shortcut (**Record** or **Detect**) |
 | **Scripts** | Write, name, delete and run scripts, and preview their steps |
-| **Indicator** | Colours, opacity, each state's dot colour, position, which way the text grows, and the hand animations |
+| **Indicator** | Colours, opacity, each state's dot colour, position, which way the text grows, the typing animation, and the hand animations |
 
 ## Privacy
 
