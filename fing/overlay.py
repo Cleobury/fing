@@ -76,6 +76,9 @@ def _base_window(root: tk.Tk) -> tk.Toplevel:
 
 
 POSITIONS = ("bottom-centre", "bottom-left", "bottom-right", "top-centre", "top-left", "top-right", "custom")
+# How the pill grows from where it's placed: "dot" keeps the dot fixed and grows away from it (for a corner);
+# "centre" keeps the whole pill centred on the spot, so it grows both ways (for the middle of the screen).
+ANCHORS = ("dot", "centre")
 
 
 class Overlay:
@@ -109,6 +112,7 @@ class Overlay:
         # Where it sits: a preset on the main screen, or "custom" = centred on (custom_x, custom_y) anywhere.
         self.position = "bottom-centre"
         self.custom_x = self.custom_y = 0
+        self.anchor = "dot"  # see ANCHORS
         self._moving = None  # while being dragged: the callback for the new (x, y); see start_move()
         self._align = "left"  # which way the text currently grows from the dot; see _anchor()
         self._drag_from = (0, 0)
@@ -185,7 +189,12 @@ class Overlay:
         """
         c = self.canvas
         left, top, right, bottom = monitor_bounds(ax, ay)
-        room = (ax + self._DOT_X - left - self.MARGIN) if mirrored else (right - self.MARGIN - (ax - self._DOT_X))
+        if self.anchor == "centre":  # as wide as fits centred on the spot, but at least half the monitor (_place nudges it on)
+            room = min(right - left - 2 * self.MARGIN, max(2 * (min(ax - left, right - ax) - self.MARGIN), (right - left) // 2))
+        elif mirrored:
+            room = ax + self._DOT_X - left - self.MARGIN
+        else:
+            room = right - self.MARGIN - (ax - self._DOT_X)
         extra = self.CHECK_W if check else 0
         max_text = max(200, room - self.PAD_X - 14 - extra)
         first, *rest = text.split("\n")
@@ -248,7 +257,8 @@ class Overlay:
     def _anchor(self) -> tuple[int, int, str]:
         """Where the dot sits (it never moves), and which way the text grows from it: "left" means the dot is
         on the left of the pill and the text grows rightwards; "right" is mirrored, growing leftwards. A dragged
-        ("custom") position grows away from the nearer edge of its monitor, so it never runs off the screen."""
+        ("custom") position grows away from the nearer edge of its monitor, so it never runs off the screen.
+        With the "centre" anchor it's the spot the pill is centred on instead (see _place)."""
         if self.position == "custom":
             ax, ay = self.custom_x, self.custom_y
             left, _, right, _ = monitor_bounds(ax, ay)
@@ -264,16 +274,21 @@ class Overlay:
 
     def _place(self, w: int, dot_y: int, ax: int, ay: int, align: str) -> tuple[int, int]:
         """Top-left corner for a box of width w (or the idle dot) whose dot, dot_y from its top, lands exactly
-        on the anchor."""
+        on the anchor. Centred, the box is centred on the anchor instead, nudged along to stay on its monitor (so
+        near a corner it lines up with the corner, as with the "dot" anchor)."""
         y = ay - dot_y
         if w == self.DOT:
             return ax - w // 2, y
+        if self.anchor == "centre":
+            left, _, right, _ = monitor_bounds(ax, ay)
+            return max(left + self.MARGIN, min(ax - w // 2, right - self.MARGIN - w)), y
         return (ax - self._DOT_X if align == "left" else ax - (w - self._DOT_X)), y
 
-    def set_position(self, position: str, x: int = 0, y: int = 0) -> None:
+    def set_position(self, position: str, x: int = 0, y: int = 0, anchor: str = "dot") -> None:
         if self._moving:
             return  # being dragged: the drag decides where it goes
         self.position = position if position in POSITIONS else "bottom-centre"
+        self.anchor = anchor if anchor in ANCHORS else "dot"
         self.custom_x, self.custom_y = x, y
         state, text, check = self._last
         self.show(state, text, check=check)

@@ -177,6 +177,9 @@ Confetti comes out of the dot.
 
 The indicator stays on top of other windows, but hides while idle when a fullscreen app or video is in front.
 To move it, choose tray icon → **Move indicator**, drag it anywhere and double-click to drop it there.
+By default the dot stays put and the text grows away from it, which suits a corner. For a spot in the middle
+of the screen, set Settings → Indicator → **Text grows** to *Both ways, staying centred*: the pill then
+stays centred where you put it, the dot moving left as the text fills it.
 
 ### Hands-free
 
@@ -253,7 +256,7 @@ mode.
 | **Phone** | The phone remote: on or off, its address, QR code and PIN, and port (default 8765) |
 | **PC search** | Search with PowerToys instead of the Start menu, and its shortcut (**Record** or **Detect**) |
 | **Scripts** | Write, name, delete and run scripts, and preview their steps |
-| **Indicator** | Colours, opacity, each state's dot colour, position, and the hand animations |
+| **Indicator** | Colours, opacity, each state's dot colour, position, which way the text grows, and the hand animations |
 
 ## Privacy
 
