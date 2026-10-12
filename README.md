@@ -149,6 +149,19 @@ Then:
 
 It runs without a console window. To see its log while debugging, run `.venv\Scripts\python -m fing`.
 
+### Fing.exe
+
+The shortcuts start Fing with Python, so Task Manager, the taskbar and the firewall list it as Python. To have
+it show up as **Fing**, build it into its own program:
+
+```powershell
+.\build.ps1
+```
+
+This builds `dist\Fing\Fing.exe` with PyInstaller (a folder of about 1.5 GB, mostly the CUDA libraries) and
+points the Fing shortcuts at it. The build is a snapshot: after changing or updating the code, run `build.ps1`
+again (or `setup.ps1` to go back to running it with Python).
+
 ## Using it
 
 | Do | What happens |
@@ -300,13 +313,13 @@ logs folder**): `app.log` for the app, `commands-<date>.jsonl` for each command.
 | Nothing happens on Right Ctrl | Check the tray icon is there; the focused app may be running as administrator |
 | The wake word goes off by itself | Use two words including a name, or move **Sensitivity** towards "Fewer false triggers". **Test** shows what it's hearing. |
 | The wake word doesn't respond | Press **Test** and say it; move **Sensitivity** towards "Catches more", or pick a phrase Whisper spells more reliably |
-| The phone page can't reach the PC | Both must be on the same network. Allow Python on private networks in Windows Defender Firewall, and check the address in Settings → Phone. |
+| The phone page can't reach the PC | Both must be on the same network. Allow Python (or Fing, with Fing.exe) on private networks in Windows Defender Firewall, and check the address in Settings → Phone. |
 | The AI planner is slow ("Thinking it through" for half a minute) | Pick a fast model in Settings → AI planner, e.g. `google/gemini-3.8-flash`, rather than `openrouter/auto`. `app.log` records how long each AI call took. |
 | PC search types into the wrong place | Settings → PC search → **Detect** or **Record** |
 
 ## Uninstalling
 
-Quit it from the tray icon, then delete the project folder, the **Fing** shortcuts (Start menu, and Startup if
+Quit it from the tray icon, then delete the project folder (including `dist`, if you built Fing.exe), the **Fing** shortcuts (Start menu, and Startup if
 you used it) and `%APPDATA%\Fing`. The API keys are under **Fing** in Credential Manager.
 
 ## How it fits together
@@ -328,6 +341,7 @@ you used it) and `%APPDATA%\Fing`. The API keys are under **Fing** in Credential
 | `apps.py`, `search.py`, `autostart.py` | Start-menu apps, PC search, Start with Windows |
 | `scripts.py`, `journal.py` | Saved scripts and their reports; the run journal for the AI's context |
 | `settings.py` | Settings file and API keys |
+| `packaging/`, `build.ps1` | Building Fing.exe with PyInstaller |
 
 Whisper must load before anything initialises COM (Windows OCR, PortAudio, the tray icon), or CTranslate2
 crashes; that's why `.audio` and `.perception` are imported late in `app.py`.

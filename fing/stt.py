@@ -13,9 +13,10 @@ log = logging.getLogger(__name__)
 def add_cuda_dll_dirs() -> None:
     """Expose the pip-installed cuBLAS/cuDNN DLLs (nvidia-*-cu12 wheels) to CTranslate2.
 
-    Must run before faster_whisper / ctranslate2 is imported.
+    Must run before faster_whisper / ctranslate2 is imported. In Fing.exe they're unpacked next to it, in _internal.
     """
-    for d in glob.glob(os.path.join(sys.prefix, "Lib", "site-packages", "nvidia", "*", "bin")):
+    base = getattr(sys, "_MEIPASS", None) or os.path.join(sys.prefix, "Lib", "site-packages")
+    for d in glob.glob(os.path.join(base, "nvidia", "*", "bin")):
         os.add_dll_directory(d)
         os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
 
