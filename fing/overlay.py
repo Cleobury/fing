@@ -31,7 +31,7 @@ _MOVE_TEXT = "Drag to move · double-click to drop it here"
 _CHECK_BG = "#3c4043"
 _CHECK_HOVER = "#34a853"
 _SW_HIDE, _SW_SHOWNOACTIVATE = 0, 4
-_HWND_TOPMOST = -1
+_HWND_TOPMOST, _HWND_NOTOPMOST = -1, -2
 _SWP_NOSIZE, _SWP_NOMOVE, _SWP_NOACTIVATE = 0x1, 0x2, 0x10
 
 
@@ -76,6 +76,9 @@ def _base_window(root: tk.Tk) -> tk.Toplevel:
 
 
 POSITIONS = ("bottom-centre", "bottom-left", "bottom-right", "top-centre", "top-left", "top-right", "custom")
+# How the pill grows from where it's placed: "dot" keeps the dot fixed and grows away from it (for a corner);
+# "centre" keeps the whole pill centred on the spot, so it grows both ways (for the middle of the screen).
+ANCHORS = ("dot", "centre")
 
 
 class Overlay:
@@ -103,12 +106,20 @@ class Overlay:
         self._clickable = False
         self._hidden = False  # hidden because a fullscreen app is in front
         self._text = ""
+        self._shown = ""  # the text on the pill right now: behind _text while it's being typed in or deleted out
+        self._type_job = None
+        self._shake_typed = False  # shake once the text being typed is all in (see shake())
+        self.on_top = True  # stay above other windows (see _keep_on_top)
+        self.over_fullscreen = False  # and over fullscreen apps too, even while idle
+        self._topmost = True  # whether the window is topmost right now
+        self.typing = True  # type the text in and delete it out, rather than swapping it at once
         self.rect = (0, 0, 0, 0)
         self._dim_listening = _mix(self.dots["listening"], self.bg, 0.55)
         self.on_check = None  # called (on the Tk thread) when the user clicks ✓ "it's done"
         # Where it sits: a preset on the main screen, or "custom" = centred on (custom_x, custom_y) anywhere.
         self.position = "bottom-centre"
         self.custom_x = self.custom_y = 0
+        self.anchor = "dot"  # see ANCHORS
         self._moving = None  # while being dragged: the callback for the new (x, y); see start_move()
         self._align = "left"  # which way the text currently grows from the dot; see _anchor()
         self._drag_from = (0, 0)
@@ -137,6 +148,7 @@ class Overlay:
             self._revert_job = None
         self.state = state
         self._text = text
+        self._shake_typed = False
         if not self._moving:
             self._last = (state, text, check)
         if self._hidden and not (state == self.idle_state and text == self.idle_text):
@@ -144,6 +156,45 @@ class Overlay:
             self._hidden = False
         text = text if len(text) <= 1000 else text[:999] + "…"
         check = check and bool(text)
+        if self._type_job:
+            self.root.after_cancel(self._type_job)
+            self._type_job = None
+        if self.typing and not self._moving and text != self._shown:
+            self._type(state, text, check, hold_ms, len(self._shown))
+            return
+        self._render(state, text, check)
+        if hold_ms:
+            self._revert_job = self.root.after(hold_ms, lambda: self.show(self.idle_state, self.idle_text))
+
+    TYPE_MS = 20  # frame time of the typing animation
+    TYPE_FRAMES, DELETE_FRAMES = 30, 15  # at most this many frames to type a text in / delete one out
+
+    def _type(self, state: str, text: str, check: bool, hold_ms: int | None, deleting_from: int) -> None:
+        """One frame of typing: first delete what's showing back to where it differs from `text` (a few letters
+        a frame for long ones, so it never drags on), then type the rest in. The ✓ appears once it's all typed,
+        and hold_ms counts from then."""
+        self._type_job = None
+        shown = self._shown
+        if text.startswith(shown):
+            shown = text[:len(shown) + max(1, math.ceil(len(text) / self.TYPE_FRAMES))]
+        else:
+            keep = 0
+            while keep < min(len(shown), len(text)) and shown[keep] == text[keep]:
+                keep += 1
+            shown = shown[:max(keep, len(shown) - max(1, math.ceil(deleting_from / self.DELETE_FRAMES)))]
+        self._render(state, shown, check and shown == text)
+        if shown != text:
+            self._type_job = self.root.after(self.TYPE_MS, lambda: self._type(state, text, check, hold_ms, deleting_from))
+            return
+        if self._shake_typed:
+            self._shake_typed = False
+            self.shake()
+        if hold_ms:
+            self._revert_job = self.root.after(hold_ms, lambda: self.show(self.idle_state, self.idle_text))
+
+    def _render(self, state: str, text: str, check: bool) -> None:
+        """Draw the pill showing `text` (empty: just the dot) and put it in place."""
+        self._shown = text
         ax, ay, align = self._anchor()
         self._align = align
         # On the right of the screen the pill is mirrored: dot on the right, text growing to its left, ✓ at the left.
@@ -168,8 +219,6 @@ class Overlay:
         self.win.geometry(f"{w}x{h}+{x}+{y}")
         self.rect = (x, y, x + w, y + h)
         self._set_clickable(check or bool(self._moving))
-        if hold_ms:
-            self._revert_job = self.root.after(hold_ms, lambda: self.show(self.idle_state, self.idle_text))
 
     CHECK_W = 30  # extra pill width for the ✓ button
     PAD_X = 32  # text inset from the dot end (the dot sits in the first 32 px)
@@ -185,7 +234,12 @@ class Overlay:
         """
         c = self.canvas
         left, top, right, bottom = monitor_bounds(ax, ay)
-        room = (ax + self._DOT_X - left - self.MARGIN) if mirrored else (right - self.MARGIN - (ax - self._DOT_X))
+        if self.anchor == "centre":  # as wide as fits centred on the spot, but at least half the monitor (_place nudges it on)
+            room = min(right - left - 2 * self.MARGIN, max(2 * (min(ax - left, right - ax) - self.MARGIN), (right - left) // 2))
+        elif mirrored:
+            room = ax + self._DOT_X - left - self.MARGIN
+        else:
+            room = right - self.MARGIN - (ax - self._DOT_X)
         extra = self.CHECK_W if check else 0
         max_text = max(200, room - self.PAD_X - 14 - extra)
         first, *rest = text.split("\n")
@@ -248,7 +302,8 @@ class Overlay:
     def _anchor(self) -> tuple[int, int, str]:
         """Where the dot sits (it never moves), and which way the text grows from it: "left" means the dot is
         on the left of the pill and the text grows rightwards; "right" is mirrored, growing leftwards. A dragged
-        ("custom") position grows away from the nearer edge of its monitor, so it never runs off the screen."""
+        ("custom") position grows away from the nearer edge of its monitor, so it never runs off the screen.
+        With the "centre" anchor it's the spot the pill is centred on instead (see _place)."""
         if self.position == "custom":
             ax, ay = self.custom_x, self.custom_y
             left, _, right, _ = monitor_bounds(ax, ay)
@@ -264,16 +319,21 @@ class Overlay:
 
     def _place(self, w: int, dot_y: int, ax: int, ay: int, align: str) -> tuple[int, int]:
         """Top-left corner for a box of width w (or the idle dot) whose dot, dot_y from its top, lands exactly
-        on the anchor."""
+        on the anchor. Centred, the box is centred on the anchor instead, nudged along to stay on its monitor (so
+        near a corner it lines up with the corner, as with the "dot" anchor)."""
         y = ay - dot_y
         if w == self.DOT:
             return ax - w // 2, y
+        if self.anchor == "centre":
+            left, _, right, _ = monitor_bounds(ax, ay)
+            return max(left + self.MARGIN, min(ax - w // 2, right - self.MARGIN - w)), y
         return (ax - self._DOT_X if align == "left" else ax - (w - self._DOT_X)), y
 
-    def set_position(self, position: str, x: int = 0, y: int = 0) -> None:
+    def set_position(self, position: str, x: int = 0, y: int = 0, anchor: str = "dot") -> None:
         if self._moving:
             return  # being dragged: the drag decides where it goes
         self.position = position if position in POSITIONS else "bottom-centre"
+        self.anchor = anchor if anchor in ANCHORS else "dot"
         self.custom_x, self.custom_y = x, y
         state, text, check = self._last
         self.show(state, text, check=check)
@@ -399,6 +459,9 @@ class Overlay:
         """Shake the pill side to side, like a head saying no (something went wrong)."""
         if self._moving:
             return
+        if self._type_job:  # the pill is still changing size: shake it once the text is in
+            self._shake_typed = True
+            return
         x0, y0, x1, y1 = self.rect
         offsets = (7, -7, 6, -6, 4, -4, 2, -1, 0)
 
@@ -439,16 +502,23 @@ class Overlay:
     def _keep_on_top(self) -> None:
         """Stay above other windows (re-asserted every second, since the taskbar and Start menu can cover it),
         but get out of the way of a fullscreen app or game on its monitor while idle. While the user is
-        actively using it (listening, working, asking, showing a result, being moved) it stays visible even then."""
+        actively using it (listening, working, asking, showing a result, being moved) it stays visible even then.
+        With over_fullscreen it never hides, and is put back on top four times a second. Without on_top it's an
+        ordinary window that others can cover (except while being moved)."""
+        top = self.on_top or bool(self._moving)
         idle = self.state == self.idle_state and self._text == self.idle_text and not self._moving
         l, t, r, b = self.rect
-        hide = idle and fullscreen_at((l + r) // 2, (t + b) // 2)
+        hide = top and idle and not self.over_fullscreen and fullscreen_at((l + r) // 2, (t + b) // 2)
         if hide != self._hidden:
             _user32.ShowWindow(self.hwnd, _SW_HIDE if hide else _SW_SHOWNOACTIVATE)
             self._hidden = hide
-        if not hide:
-            _user32.SetWindowPos(self.hwnd, _HWND_TOPMOST, 0, 0, 0, 0, _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE)
-        self.root.after(1000, self._keep_on_top)
+        flags = _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE
+        if top and not hide:
+            _user32.SetWindowPos(self.hwnd, _HWND_TOPMOST, 0, 0, 0, 0, flags)
+        elif not top and self._topmost:  # only once: each NOTOPMOST call would bring it in front of other windows
+            _user32.SetWindowPos(self.hwnd, _HWND_NOTOPMOST, 0, 0, 0, 0, flags)
+        self._topmost = top
+        self.root.after(250 if top and self.over_fullscreen else 1000, self._keep_on_top)
 
 
 class Highlight:

@@ -175,8 +175,14 @@ throws confetti when a request is done. When something goes wrong the pill shake
 the hand off and has buttons to try each animation: Wave and Tap play big in the middle of the main screen,
 Confetti comes out of the dot.
 
-The indicator stays on top of other windows, but hides while idle when a fullscreen app or video is in front.
+The indicator stays on top of other windows, but hides while idle when a fullscreen app or video is in front
+(Settings → Indicator: untick **Always on top** to let other windows cover it, or tick **Include fullscreen apps
+and games** to keep it showing over those too).
 To move it, choose tray icon → **Move indicator**, drag it anywhere and double-click to drop it there.
+By default the dot stays put and the text grows away from it, which suits a corner. For a spot in the middle
+of the screen, set Settings → Indicator → **Text grows** to *Both ways, staying centred*: the pill then
+stays centred where you put it, the dot moving left as the text fills it.
+Each message types itself in and deletes itself out; switch that off with **Type the text in and delete it out**.
 
 ### Hands-free
 
@@ -253,7 +259,7 @@ mode.
 | **Phone** | The phone remote: on or off, its address, QR code and PIN, and port (default 8765) |
 | **PC search** | Search with PowerToys instead of the Start menu, and its shortcut (**Record** or **Detect**) |
 | **Scripts** | Write, name, delete and run scripts, and preview their steps |
-| **Indicator** | Colours, opacity, each state's dot colour, position, and the hand animations |
+| **Indicator** | Colours, opacity, each state's dot colour, position, which way the text grows, the typing animation, and the hand animations |
 
 ## Privacy
 

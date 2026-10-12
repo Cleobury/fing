@@ -410,8 +410,10 @@ class App:
         s = s or self.settings
         if hasattr(self, "fx"):
             self.fx.enabled = s.overlay_fx
+        self.overlay.typing = s.overlay_typing
+        self.overlay.on_top, self.overlay.over_fullscreen = s.overlay_on_top, s.overlay_over_fullscreen
         self.overlay.apply_style(s.overlay_bg, s.overlay_fg, s.overlay_opacity, s.overlay_dots)
-        self.overlay.set_position(s.overlay_position, s.overlay_x, s.overlay_y)
+        self.overlay.set_position(s.overlay_position, s.overlay_x, s.overlay_y, s.overlay_anchor)
 
     def move_overlay(self) -> None:
         """Tray menu → Move indicator: drag it anywhere, double-click to drop; the spot is saved."""
