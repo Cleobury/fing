@@ -90,7 +90,8 @@ class Settings:
     overlay_y: int = 0
     # How it grows from there: "dot" keeps the dot still (for a corner); "centre" keeps the pill centred on the spot.
     overlay_anchor: str = "dot"
-    overlay_always_on_top: bool = False  # stay showing over fullscreen apps and games too, even while idle
+    overlay_on_top: bool = True  # stay above other windows
+    overlay_over_fullscreen: bool = False  # and over fullscreen apps and games too, even while idle
     overlay_typing: bool = True  # type the text in and delete it out, rather than swapping it at once
     overlay_fx: bool = True  # the hand animations: tapping what it clicks, waving, confetti when done
 

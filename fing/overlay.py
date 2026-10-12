@@ -31,7 +31,7 @@ _MOVE_TEXT = "Drag to move · double-click to drop it here"
 _CHECK_BG = "#3c4043"
 _CHECK_HOVER = "#34a853"
 _SW_HIDE, _SW_SHOWNOACTIVATE = 0, 4
-_HWND_TOPMOST = -1
+_HWND_TOPMOST, _HWND_NOTOPMOST = -1, -2
 _SWP_NOSIZE, _SWP_NOMOVE, _SWP_NOACTIVATE = 0x1, 0x2, 0x10
 
 
@@ -109,7 +109,9 @@ class Overlay:
         self._shown = ""  # the text on the pill right now: behind _text while it's being typed in or deleted out
         self._type_job = None
         self._shake_typed = False  # shake once the text being typed is all in (see shake())
-        self.always_on_top = False  # stay showing over fullscreen apps too, even while idle (see _keep_on_top)
+        self.on_top = True  # stay above other windows (see _keep_on_top)
+        self.over_fullscreen = False  # and over fullscreen apps too, even while idle
+        self._topmost = True  # whether the window is topmost right now
         self.typing = True  # type the text in and delete it out, rather than swapping it at once
         self.rect = (0, 0, 0, 0)
         self._dim_listening = _mix(self.dots["listening"], self.bg, 0.55)
@@ -501,16 +503,22 @@ class Overlay:
         """Stay above other windows (re-asserted every second, since the taskbar and Start menu can cover it),
         but get out of the way of a fullscreen app or game on its monitor while idle. While the user is
         actively using it (listening, working, asking, showing a result, being moved) it stays visible even then.
-        With always_on_top it never hides, and is put back on top four times a second."""
+        With over_fullscreen it never hides, and is put back on top four times a second. Without on_top it's an
+        ordinary window that others can cover (except while being moved)."""
+        top = self.on_top or bool(self._moving)
         idle = self.state == self.idle_state and self._text == self.idle_text and not self._moving
         l, t, r, b = self.rect
-        hide = idle and not self.always_on_top and fullscreen_at((l + r) // 2, (t + b) // 2)
+        hide = top and idle and not self.over_fullscreen and fullscreen_at((l + r) // 2, (t + b) // 2)
         if hide != self._hidden:
             _user32.ShowWindow(self.hwnd, _SW_HIDE if hide else _SW_SHOWNOACTIVATE)
             self._hidden = hide
-        if not hide:
-            _user32.SetWindowPos(self.hwnd, _HWND_TOPMOST, 0, 0, 0, 0, _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE)
-        self.root.after(250 if self.always_on_top else 1000, self._keep_on_top)
+        flags = _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE
+        if top and not hide:
+            _user32.SetWindowPos(self.hwnd, _HWND_TOPMOST, 0, 0, 0, 0, flags)
+        elif not top and self._topmost:  # only once: each NOTOPMOST call would bring it in front of other windows
+            _user32.SetWindowPos(self.hwnd, _HWND_NOTOPMOST, 0, 0, 0, 0, flags)
+        self._topmost = top
+        self.root.after(250 if top and self.over_fullscreen else 1000, self._keep_on_top)
 
 
 class Highlight:

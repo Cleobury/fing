@@ -176,7 +176,8 @@ the hand off and has buttons to try each animation: Wave and Tap play big in the
 Confetti comes out of the dot.
 
 The indicator stays on top of other windows, but hides while idle when a fullscreen app or video is in front
-(Settings → Indicator → **Always on top** keeps it showing even then).
+(Settings → Indicator: untick **Always on top** to let other windows cover it, or tick **Include fullscreen apps
+and games** to keep it showing over those too).
 To move it, choose tray icon → **Move indicator**, drag it anywhere and double-click to drop it there.
 By default the dot stays put and the text grows away from it, which suits a corner. For a spot in the middle
 of the screen, set Settings → Indicator → **Text grows** to *Both ways, staying centred*: the pill then

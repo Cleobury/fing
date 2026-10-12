@@ -1057,10 +1057,15 @@ class SettingsDialog:
         ttk.Checkbutton(f, text="Type the text in and delete it out", variable=self.overlay_typing,
                         command=lambda: self._preview("done", "Like this: each message types itself in")).grid(
             row=6, column=1, columnspan=3, sticky="w", pady=(8, 0))
-        self.overlay_on_top = tk.BooleanVar(value=s.overlay_always_on_top)
-        ttk.Checkbutton(f, text="Always on top, even over fullscreen apps and games", variable=self.overlay_on_top,
-                        command=lambda: self._preview("idle", self._sample_idle())).grid(
-            row=7, column=1, columnspan=3, sticky="w", pady=(4, 0))
+        self.overlay_on_top = tk.BooleanVar(value=s.overlay_on_top)
+        self.overlay_fullscreen = tk.BooleanVar(value=s.overlay_over_fullscreen)
+        top = ttk.Frame(f)
+        top.grid(row=7, column=1, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(top, text="Always on top", variable=self.overlay_on_top, command=self._on_top_changed).pack(side="left")
+        self.fullscreen_check = ttk.Checkbutton(top, text="Include fullscreen apps and games", variable=self.overlay_fullscreen,
+                                                command=lambda: self._preview("idle", self._sample_idle()))
+        self.fullscreen_check.pack(side="left", padx=(16, 0))
+        self._on_top_changed(preview=False)
 
         ttk.Label(f, text="Dot colours", style="Heading.TLabel").grid(row=8, column=0, columnspan=4, sticky="w", pady=(18, 0))
         for i, (state, (label, sample)) in enumerate(_DOT_LABELS.items()):
@@ -1149,6 +1154,11 @@ class SettingsDialog:
     def _position_id(self) -> str:
         return next(k for k, v in _POSITION_LABELS.items() if v == self.position.get())
 
+    def _on_top_changed(self, preview: bool = True) -> None:
+        self.fullscreen_check.state(["!disabled"] if self.overlay_on_top.get() else ["disabled"])
+        if preview:
+            self._preview("idle", self._sample_idle())
+
     def _anchor_id(self) -> str:
         return next(k for k, v in _ANCHOR_LABELS.items() if v == self.anchor.get())
 
@@ -1157,7 +1167,9 @@ class SettingsDialog:
         self.position.set(_POSITION_LABELS["bottom-centre"])
         self.anchor.set(_ANCHOR_LABELS["dot"])
         self.overlay_typing.set(True)
-        self.overlay_on_top.set(False)
+        self.overlay_on_top.set(True)
+        self.overlay_fullscreen.set(False)
+        self._on_top_changed(preview=False)
         self.opacity.set(100)
         for key, b in self.swatches.items():
             colour = self.style["dots"].get(key) or self.style[key]
@@ -1170,7 +1182,8 @@ class SettingsDialog:
                        overlay_position=self._position_id(), overlay_x=self.custom_xy[0], overlay_y=self.custom_xy[1],
                        overlay_anchor=self._anchor_id(),
                        overlay_typing=self.overlay_typing.get(),
-                       overlay_always_on_top=self.overlay_on_top.get(), overlay_fx=self.overlay_fx.get())
+                       overlay_on_top=self.overlay_on_top.get(),
+                       overlay_over_fullscreen=self.overlay_fullscreen.get(), overlay_fx=self.overlay_fx.get())
 
     def _changed_dots(self) -> dict[str, str]:
         return {k: v for k, v in self.style["dots"].items() if v.lower() != DEFAULT_DOTS[k].lower()}
@@ -1277,7 +1290,8 @@ class SettingsDialog:
         s.overlay_x, s.overlay_y = self.custom_xy
         s.overlay_anchor = self._anchor_id()
         s.overlay_typing = self.overlay_typing.get()
-        s.overlay_always_on_top = self.overlay_on_top.get()
+        s.overlay_on_top = self.overlay_on_top.get()
+        s.overlay_over_fullscreen = self.overlay_fullscreen.get()
         s.overlay_fx = self.overlay_fx.get()
         self._store_script()
         save_scripts(self.scripts)
