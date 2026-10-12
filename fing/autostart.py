@@ -14,11 +14,14 @@ SHORTCUT = os.path.join(_STARTUP, "Fing.lnk")
 OLD_SHORTCUT = os.path.join(_STARTUP, "Jev Harness.lnk")  # made before the rename; still counts, replaced on enable
 
 
-def _pythonw() -> str:
-    """pythonw.exe next to the running interpreter (no console window at sign-in)."""
-    folder = os.path.dirname(sys.executable)
-    candidate = os.path.join(folder, "pythonw.exe")
-    return candidate if os.path.exists(candidate) else sys.executable
+def _target() -> tuple[str, str, str, str]:
+    """(program, arguments, working folder, icon) that start this copy of the app: Fing.exe when it's the packaged
+    build, otherwise pythonw.exe next to the running interpreter (no console window at sign-in)."""
+    if getattr(sys, "frozen", False):
+        return sys.executable, "", os.path.dirname(sys.executable), sys.executable
+    candidate = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    exe = candidate if os.path.exists(candidate) else sys.executable
+    return exe, "-m fing", PROJECT_DIR, os.path.join(_PACKAGE_DIR, "icon.ico")
 
 
 def is_enabled() -> bool:
@@ -30,11 +33,12 @@ def enable() -> None:
     def ps(s: str) -> str:
         return s.replace("'", "''")
 
+    exe, args, cwd, icon = _target()
     script = (
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{lnk}'); "
-        "$s.TargetPath = '{exe}'; $s.Arguments = '-m fing'; $s.WorkingDirectory = '{cwd}'; "
+        "$s.TargetPath = '{exe}'; $s.Arguments = '{args}'; $s.WorkingDirectory = '{cwd}'; "
         "$s.IconLocation = '{icon}'; $s.Description = 'Fing: your desktop assistant'; $s.Save()"
-    ).format(lnk=ps(SHORTCUT), exe=ps(_pythonw()), cwd=ps(PROJECT_DIR), icon=ps(os.path.join(_PACKAGE_DIR, "icon.ico")))
+    ).format(lnk=ps(SHORTCUT), exe=ps(exe), args=ps(args), cwd=ps(cwd), icon=ps(icon))
     subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True,
                    capture_output=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
     _remove(OLD_SHORTCUT)

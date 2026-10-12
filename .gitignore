@@ -17,3 +17,7 @@ desktop.ini
 
 # Local secrets, just in case (keys normally live in Windows Credential Manager)
 .env
+
+# PyInstaller output (build.ps1)
+build/
+dist/
