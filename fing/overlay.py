@@ -109,6 +109,7 @@ class Overlay:
         self._shown = ""  # the text on the pill right now: behind _text while it's being typed in or deleted out
         self._type_job = None
         self._shake_typed = False  # shake once the text being typed is all in (see shake())
+        self.always_on_top = False  # stay showing over fullscreen apps too, even while idle (see _keep_on_top)
         self.typing = True  # type the text in and delete it out, rather than swapping it at once
         self.rect = (0, 0, 0, 0)
         self._dim_listening = _mix(self.dots["listening"], self.bg, 0.55)
@@ -499,16 +500,17 @@ class Overlay:
     def _keep_on_top(self) -> None:
         """Stay above other windows (re-asserted every second, since the taskbar and Start menu can cover it),
         but get out of the way of a fullscreen app or game on its monitor while idle. While the user is
-        actively using it (listening, working, asking, showing a result, being moved) it stays visible even then."""
+        actively using it (listening, working, asking, showing a result, being moved) it stays visible even then.
+        With always_on_top it never hides, and is put back on top four times a second."""
         idle = self.state == self.idle_state and self._text == self.idle_text and not self._moving
         l, t, r, b = self.rect
-        hide = idle and fullscreen_at((l + r) // 2, (t + b) // 2)
+        hide = idle and not self.always_on_top and fullscreen_at((l + r) // 2, (t + b) // 2)
         if hide != self._hidden:
             _user32.ShowWindow(self.hwnd, _SW_HIDE if hide else _SW_SHOWNOACTIVATE)
             self._hidden = hide
         if not hide:
             _user32.SetWindowPos(self.hwnd, _HWND_TOPMOST, 0, 0, 0, 0, _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE)
-        self.root.after(1000, self._keep_on_top)
+        self.root.after(250 if self.always_on_top else 1000, self._keep_on_top)
 
 
 class Highlight:

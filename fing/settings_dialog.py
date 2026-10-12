@@ -1057,20 +1057,24 @@ class SettingsDialog:
         ttk.Checkbutton(f, text="Type the text in and delete it out", variable=self.overlay_typing,
                         command=lambda: self._preview("done", "Like this: each message types itself in")).grid(
             row=6, column=1, columnspan=3, sticky="w", pady=(8, 0))
+        self.overlay_on_top = tk.BooleanVar(value=s.overlay_always_on_top)
+        ttk.Checkbutton(f, text="Always on top, even over fullscreen apps and games", variable=self.overlay_on_top,
+                        command=lambda: self._preview("idle", self._sample_idle())).grid(
+            row=7, column=1, columnspan=3, sticky="w", pady=(4, 0))
 
-        ttk.Label(f, text="Dot colours", style="Heading.TLabel").grid(row=7, column=0, columnspan=4, sticky="w", pady=(18, 0))
+        ttk.Label(f, text="Dot colours", style="Heading.TLabel").grid(row=8, column=0, columnspan=4, sticky="w", pady=(18, 0))
         for i, (state, (label, sample)) in enumerate(_DOT_LABELS.items()):
-            row, col = 8 + i // 2, (i % 2) * 2
+            row, col = 9 + i // 2, (i % 2) * 2
             ttk.Label(f, text=label).grid(row=row, column=col, sticky="w", pady=(8, 0), padx=(0, 12))
             self._swatch(f, state, row, col + 1, f"{label} dot", sample, dot=True)
-        ttk.Button(f, text="Reset to defaults", command=self._reset_style).grid(row=12, column=0, columnspan=4, sticky="w", pady=(14, 0))
+        ttk.Button(f, text="Reset to defaults", command=self._reset_style).grid(row=13, column=0, columnspan=4, sticky="w", pady=(14, 0))
 
-        ttk.Label(f, text="Hand animations", style="Heading.TLabel").grid(row=13, column=0, columnspan=4, sticky="w", pady=(18, 0))
+        ttk.Label(f, text="Hand animations", style="Heading.TLabel").grid(row=14, column=0, columnspan=4, sticky="w", pady=(18, 0))
         self.overlay_fx = tk.BooleanVar(value=s.overlay_fx)
         ttk.Checkbutton(f, text="Show the hand: it taps what it clicks, waves hello and celebrates when it's done",
-                        variable=self.overlay_fx).grid(row=14, column=0, columnspan=4, sticky="w", pady=(8, 0))
+                        variable=self.overlay_fx).grid(row=15, column=0, columnspan=4, sticky="w", pady=(8, 0))
         demo = ttk.Frame(f)
-        demo.grid(row=15, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        demo.grid(row=16, column=0, columnspan=4, sticky="w", pady=(8, 0))
         ttk.Label(demo, text="Try one:", style="Muted.TLabel").pack(side="left", padx=(0, 8))
         for text, name in (("Wave", "wave"), ("Tap", "tap"), ("Confetti", "celebrate"), ("Shake", "shake")):
             ttk.Button(demo, text=text, command=lambda n=name: self._demo_fx(n)).pack(side="left", padx=(0, 6))
@@ -1153,6 +1157,7 @@ class SettingsDialog:
         self.position.set(_POSITION_LABELS["bottom-centre"])
         self.anchor.set(_ANCHOR_LABELS["dot"])
         self.overlay_typing.set(True)
+        self.overlay_on_top.set(False)
         self.opacity.set(100)
         for key, b in self.swatches.items():
             colour = self.style["dots"].get(key) or self.style[key]
@@ -1164,7 +1169,8 @@ class SettingsDialog:
                        overlay_opacity=round(self.opacity.get()), overlay_dots=self._changed_dots(),
                        overlay_position=self._position_id(), overlay_x=self.custom_xy[0], overlay_y=self.custom_xy[1],
                        overlay_anchor=self._anchor_id(),
-                       overlay_typing=self.overlay_typing.get(), overlay_fx=self.overlay_fx.get())
+                       overlay_typing=self.overlay_typing.get(),
+                       overlay_always_on_top=self.overlay_on_top.get(), overlay_fx=self.overlay_fx.get())
 
     def _changed_dots(self) -> dict[str, str]:
         return {k: v for k, v in self.style["dots"].items() if v.lower() != DEFAULT_DOTS[k].lower()}
@@ -1271,6 +1277,7 @@ class SettingsDialog:
         s.overlay_x, s.overlay_y = self.custom_xy
         s.overlay_anchor = self._anchor_id()
         s.overlay_typing = self.overlay_typing.get()
+        s.overlay_always_on_top = self.overlay_on_top.get()
         s.overlay_fx = self.overlay_fx.get()
         self._store_script()
         save_scripts(self.scripts)
